@@ -1,0 +1,66 @@
+# ===== yt-playlist-sync 設定 =====
+# チャンネルIDは「UC」で始まる24文字。チャンネルページ →「概要」→「チャンネルを共有」→「チャンネルIDをコピー」で取得できます。
+
+playlist_privacy: private      # 自動で作る再生リストの公開設定 (private / unlisted / public)
+
+quota:
+  daily_budget: 9000           # 1日1万ユニットのうち、このプログラムが使う上限
+
+titles:                        # 再生リスト名のフォーマット
+  own: "{name}チャンネル"
+  other: "その他{name}"
+  unsorted: 未仕分け
+  misc: その他の曲
+
+music:                         # 「曲」とみなす動画の判定
+  categories: ["10"]           # YouTubeの音楽カテゴリ
+  include_keywords: [歌ってみた, うたってみた, cover, カバー, MV, "Music Video", オリジナル曲, "Original Song", 弾き語り, "feat.", "self cover", セルフカバー]
+  exclude_keywords: ["#shorts", 切り抜き, 歌枠, 配信, 雑談, 告知, 予告, teaser, trailer, クロスフェード, XFD, "short ver", ショート]
+  min_seconds: 61              # これ未満はショートとして除外
+  max_seconds: 900             # これ超は配信アーカイブ・メドレー等として除外
+
+matching:
+  use_description: true        # 「その他○○」やコラボ判定で概要欄も見る
+
+promotion:                     # 「その他の曲」→「お気に入りの曲」昇格
+  enabled: true
+  min_versions: 5              # 本家/カバーが監視チャンネル内でこの数以上あれば昇格
+  ignore: []                   # 昇格させたくない曲名
+
+unsorted:
+  auto_remove_when_sorted: true  # 他の再生リストに仕分けられたら「未仕分け」から外す
+
+ignore_video_ids: []           # どの再生リストにも自動で入れない動画ID
+
+# ---- 特にお気に入りのチャンネル：本人名義の全曲 →「○○チャンネル」、他チャンネルの関係曲 →「その他○○」
+top_favorites:
+  - name: 例のアーティスト
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]   # サブチャンネルがあれば複数可
+    aliases: [例のアーティスト, Example Artist] # 他チャンネルの動画タイトル・概要欄で探す名前
+    search: false              # true にすると監視外チャンネルも毎日検索（100ユニット/日）
+    # exclude_keywords: []     # 「その他○○」から除外したい語
+    # include_video_ids: []    # 手動で必ず入れる動画（各ルール共通）
+    # exclude_video_ids: []    # 手動で除外する動画（各ルール共通）
+
+# ---- お気に入りのチャンネル：新着は「未仕分け」へ（○○チャンネルへの仕分けは手動）
+favorites:
+  - name: お気に入りの人
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
+
+# ---- たまに聴くチャンネル：お気に入りの曲・コラボ組に当たらない新着は「未仕分け」へ
+occasional:
+  - name: たまに聴く人
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
+
+# ---- お気に入りの曲：公式＋上の3分類のチャンネルによるカバー → 曲名の再生リスト
+songs:
+  - title: 曲名
+    aliases: [曲名, Song Title]                 # 動画タイトルに含まれていれば該当
+    official_channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
+    # exclude_keywords: [曲名2]                  # 似た名前の別曲を除外
+
+# ---- たまに聴くチャンネル × コラボ相手（self cover 等は include_video_ids で追加）
+combos:
+  - playlist: ○○△△
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
+    partner_aliases: [△△]                      # 空ならそのチャンネルの全曲
