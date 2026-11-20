@@ -38,6 +38,10 @@ def _label(v: dict | None, vid: str) -> str:
     return f"{v.get('title')} / {v.get('channel_title') or '?'} (https://youtu.be/{vid})"
 
 
+def handles_of(state: dict) -> dict[str, str]:
+    return {c: h["handle"] for c, h in (state.get("handles") or {}).items() if h.get("handle")}
+
+
 def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Report) -> list[str]:
     """チャンネルのアップロード一覧を差分取得。新着ID（初回取込時は空）を返す。"""
     ch = catalog.channel(cid)
@@ -88,6 +92,13 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             else:
                 title_to_id[pl["title"]] = pl["id"]
             ledger.apply_snapshot(pl["id"], pl["title"], yt.playlist_items(pl["id"]), today)
+        alive = {p["id"] for p in playlists}
+        for title, info in rules.rule_titles(cfg).items():
+            pin = info.get("playlist_id")
+            if pin and pin in alive:
+                title_to_id[title] = pin
+            elif pin:
+                rep.add("警告", f"「{title}」の playlist_id {pin} が自分の再生リストに見つかりません（名前で照合します）")
         for t in ledger.mark_deleted_playlists({p["id"] for p in playlists}, today):
             rep.add("警告", f"再生リスト「{t}」がYouTube上から消えています（台帳は保持）")
         for doc in ledger.docs.values():
@@ -101,6 +112,16 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         for cid in roles:
             new_ids += update_channel(yt, catalog, cid, today, rep)
 
+        # 2b. @ハンドルの取得（その他○○・コラボ相手の判定用、7日ごとに更新）
+        hcache = dict(state.get("handles") or {})
+        stale = sorted(c for c in rules.handle_channel_ids(cfg)
+                       if c not in hcache or hcache[c].get("checked", "") < (now - timedelta(days=7)).date().isoformat())
+        if stale:
+            found = yt.channel_handles(stale)
+            for c in stale:
+                hcache[c] = {"handle": found.get(c), "checked": today}
+        state["handles"] = hcache
+
         # 3. 特にお気に入りの「その他○○」を検索（任意・100ユニット/回）
         searches = dict(state.get("search_after") or {})
         for t in cfg.list("top_favorites"):
@@ -108,9 +129,11 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                 continue
             after = searches.get(t["name"]) or (now - timedelta(days=3)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             ids = [i for i in yt.search_video_ids(t.get("search_query") or t["name"], after) if i not in catalog]
-            aliases = list(t.get("aliases") or []) or [t["name"]]
+            refs = rules.channel_refs(t.get("channel_ids"), handles_of(state))
+            aliases = t.get("aliases") or []
             for v in yt.videos(ids):
-                if rules.matches_alias(f"{v['title']}\n{v['description']}", aliases):
+                text = f"{v['title']}\n{v['description']}"
+                if rules.matches_channel_ref(text, refs) or (aliases and rules.matches_alias(text, aliases)):
                     catalog.add(EXTERNAL, v)
                     new_ids.append(v["id"])
             searches[t["name"]] = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -138,7 +161,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             rep.add("お気に入りの曲に昇格", f"{c['title']}（{c['versions']} 曲）")
 
     # 6. 振り分け先を計算
-    targets = rules.build_targets(cfg, videos, roles)
+    targets = rules.build_targets(cfg, videos, roles, handles_of(state))
     unsorted_add = []
     for vid in dict.fromkeys(new_ids):
         v = catalog.get(vid)
@@ -219,6 +242,18 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                     rep.add("未仕分けから除外", e.get("title") or vid)
             except QuotaExceeded:
                 rep.add("警告", "クォータ上限のため未仕分けの整理を中断しました")
+
+    # 8b. すでに再生リスト内にある重複（自動では消さず、レポートのみ）
+    if cfg.section("dedupe")["enabled"]:
+        ents = rules.entity_map(cfg)
+        by_id = {v["id"]: v for v in videos}
+        for title in targets:
+            pid = title_to_id.get(title)
+            if not pid:
+                continue
+            present = [e["video_id"] for e in ledger.present(pid)]
+            for g in rules.duplicate_groups(present, by_id, lambda c: ents.get(c) or c):
+                rep.add("重複の可能性（手動で確認）", f"{title}: " + " / ".join(_label(catalog.get(v), v) for v in g))
 
     # 9. 保存とレポート
     state["last_run"] = now.isoformat(timespec="seconds")

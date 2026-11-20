@@ -48,6 +48,12 @@ class FakeYouTube(YouTube):
             out += [dict(self.v[x]) for x in ids[i:i + 50] if x in self.v]
         return out
 
+    handles = {"UCalice": "@alice_official", "UCdave": "@dave"}
+
+    def channel_handles(self, ids):
+        self._spend("list")
+        return {i: self.handles[i] for i in ids if i in self.handles}
+
     def create_playlist(self, title, privacy):
         self._spend("insert")
         self.n += 1
@@ -198,3 +204,23 @@ def test_extract_song_title():
     assert rules.extract_song_title("【cover】夜の曲 / ボブ") == "夜の曲"
     assert rules.extract_song_title("Song Name (Official Music Video)") == "Song Name"
     assert uploads_playlist_id("UCabc") == "UUabc"
+
+
+def test_playlist_id_pin_survives_rename(tmp_path):
+    yt = setup(tmp_path)
+    cfg = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    cfg = cfg.replace("    aliases: [アリス, Alice]\n", "    aliases: [アリス, Alice]\n    playlist_id: PLalice\n")
+    (tmp_path / "config.yaml").write_text(cfg, encoding="utf-8")
+    yt.pl["PLalice"]["title"] = "アリス（改名）"
+    run(yt=yt, now=datetime(2026, 1, 10, 4, tzinfo=JST), **kw(tmp_path))
+    t = titles(yt)
+    assert "アリスチャンネル" not in t and t["アリス（改名）"] == ["a1", "a2"]
+
+
+def test_other_by_handle_without_aliases(tmp_path):
+    yt = setup(tmp_path)
+    cfg = (tmp_path / "config.yaml").read_text(encoding="utf-8").replace("    aliases: [アリス, Alice]\n", "")
+    (tmp_path / "config.yaml").write_text(cfg, encoding="utf-8")
+    yt.v["c5"] = V("c5", "昼の曲 / キャロル", "UCcarol", "01-08", desc="mix: @alice_official")
+    run(yt=yt, now=datetime(2026, 1, 10, 4, tzinfo=JST), **kw(tmp_path))
+    assert titles(yt)["その他アリス"] == ["c5"]  # 名前だけの c3 は対象外

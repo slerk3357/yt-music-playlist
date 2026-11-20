@@ -47,6 +47,7 @@ DEFAULTS = {
         "max_seconds": 900,
     },
     "matching": {"use_description": True},
+    "dedupe": {"enabled": True},
     "promotion": {"enabled": True, "min_versions": 5, "ignore": []},
     "unsorted": {"auto_remove_when_sorted": True},
 }

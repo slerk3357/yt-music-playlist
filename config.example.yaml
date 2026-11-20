@@ -6,6 +6,12 @@ playlist_privacy: private      # 自動で作る再生リストの公開設定 (
 quota:
   daily_budget: 9000           # 1日1万ユニットのうち、このプログラムが使う上限
 
+# 再生リストは playlist_id があればIDで、なければ名前（下のフォーマット）で探します。
+# IDで指定しておくと、YouTube上で名前を変えても同じ再生リストを使い続けます。
+playlist_ids:
+  unsorted: PLxxxxxxxxxxxxxxxx   # 「未仕分け」（任意）
+  misc: PLxxxxxxxxxxxxxxxx       # 「その他の曲」（任意）
+
 titles:                        # 再生リスト名のフォーマット
   own: "{name}チャンネル"
   other: "その他{name}"
@@ -22,6 +28,9 @@ music:                         # 「曲」とみなす動画の判定
 matching:
   use_description: true        # 「その他○○」やコラボ判定で概要欄も見る
 
+dedupe:                        # 同じ人の同じ曲・同じバージョンは1本だけ入れる（MV優先、TOPIC音源は後回し）
+  enabled: true                # Remix・Acoustic Ver. 等の別バージョンは別の曲として扱う
+
 promotion:                     # 「その他の曲」→「お気に入りの曲」昇格
   enabled: true
   min_versions: 5              # 本家/カバーが監視チャンネル内でこの数以上あれば昇格
@@ -35,8 +44,11 @@ ignore_video_ids: []           # どの再生リストにも自動で入れな�
 # ---- 特にお気に入りのチャンネル：本人名義の全曲 →「○○チャンネル」、他チャンネルの関係曲 →「その他○○」
 top_favorites:
   - name: 例のアーティスト
-    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]   # サブチャンネルがあれば複数可
-    aliases: [例のアーティスト, Example Artist] # 他チャンネルの動画タイトル・概要欄で探す名前
+    playlist_id: PLxxxxxxxxxxxxxxxx           # 「○○チャンネル」（任意）
+    other_playlist_id: PLxxxxxxxxxxxxxxxx     # 「その他○○」（任意）
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]   # 本人・サブ・TOPICチャンネルを並べる（同一人物として重複除去）
+    # 「その他○○」は、他チャンネルの動画の概要欄に @ハンドル または チャンネルURL があるもの
+    # aliases: [例のアーティスト]              # 任意：名前でも探す（同名の別人が混ざる可能性あり）
     search: false              # true にすると監視外チャンネルも毎日検索（100ユニット/日）
     # exclude_keywords: []     # 「その他○○」から除外したい語
     # include_video_ids: []    # 手動で必ず入れる動画（各ルール共通）
@@ -45,6 +57,7 @@ top_favorites:
 # ---- お気に入りのチャンネル：新着は「未仕分け」へ（○○チャンネルへの仕分けは手動）
 favorites:
   - name: お気に入りの人
+    playlist_id: PLxxxxxxxxxxxxxxxx
     channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
 
 # ---- たまに聴くチャンネル：お気に入りの曲・コラボ組に当たらない新着は「未仕分け」へ
@@ -55,6 +68,7 @@ occasional:
 # ---- お気に入りの曲：公式＋上の3分類のチャンネルによるカバー → 曲名の再生リスト
 songs:
   - title: 曲名
+    playlist_id: PLxxxxxxxxxxxxxxxx           # 任意
     aliases: [曲名, Song Title]                 # 動画タイトルに含まれていれば該当
     official_channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
     # exclude_keywords: [曲名2]                  # 似た名前の別曲を除外
@@ -62,5 +76,7 @@ songs:
 # ---- たまに聴くチャンネル × コラボ相手（self cover 等は include_video_ids で追加）
 combos:
   - playlist: ○○△△
-    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
-    partner_aliases: [△△]                      # 空ならそのチャンネルの全曲
+    playlist_id: PLxxxxxxxxxxxxxxxx           # 任意
+    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]   # ○○のチャンネル（TOPIC等も並べてよい）
+    partner_channel_ids: [UCyyyyyyyyyyyyyyyyyyyyyy]  # △△のチャンネル：概要欄の @ハンドル/URL で判定
+    # partner_aliases: [△△]                   # 任意：名前でも探す（どちらも空ならそのチャンネルの全曲）
