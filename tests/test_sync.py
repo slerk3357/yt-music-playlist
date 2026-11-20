@@ -93,16 +93,15 @@ favorites:
 occasional:
   - name: キャロル
     channel_ids: [UCcarol]
+    specials:
+      - playlist: キャロルとデイブ
+        mention_aliases: [デイブ]
   - name: デイブ
     channel_ids: [UCdave]
 songs:
   - title: 星の歌
     aliases: [星の歌, Hoshi no Uta]
     official_channel_ids: [UCofficial]
-combos:
-  - playlist: キャロルとデイブ
-    channel_ids: [UCcarol]
-    partner_aliases: [デイブ]
 """
 
 

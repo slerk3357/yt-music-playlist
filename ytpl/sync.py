@@ -77,6 +77,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     state_path = data / "state.yaml"
     state = dict(load_yaml(state_path, {}) or {})
     rep = Report()
+    errors = rules.validate(cfg)
+    if errors:
+        raise SystemExit("config.yaml の設定エラー:\n" + "\n".join(f"- {e}" for e in errors))
     roles = rules.channel_roles(cfg)
     t_unsorted, t_misc = cfg.title("unsorted"), cfg.title("misc")
     quota_hit = False
@@ -161,14 +164,14 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             rep.add("お気に入りの曲に昇格", f"{c['title']}（{c['versions']} 曲）")
 
     # 6. 振り分け先を計算
-    targets = rules.build_targets(cfg, videos, roles, handles_of(state))
+    tg = rules.build_targets(cfg, videos, roles, handles_of(state))
+    losers = rules.duplicate_losers(cfg, videos)
     unsorted_add = []
     for vid in dict.fromkeys(new_ids):
         v = catalog.get(vid)
-        hits = {t for t, s in targets.items() if vid in s}
-        if v and rules.needs_unsorted(cfg, v, roles, hits):
+        if v and rules.needs_unsorted(cfg, v, roles, *tg.hits(vid), losers):
             unsorted_add.append(vid)
-    plan_targets = {t_unsorted: set(unsorted_add), **targets}
+    plan_targets = {t_unsorted: set(unsorted_add), **tg.auto}
 
     def pub(vid):
         v = catalog.get(vid)
@@ -222,17 +225,18 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         # 8. 仕分け済みになった曲を「未仕分け」から外す
         pid_u = title_to_id.get(t_unsorted)
         if pid_u and cfg.section("unsorted")["auto_remove_when_sorted"] and not quota_hit:
-            managed = rules.managed_titles(cfg, targets) - {t_unsorted}
-            managed_pids = [title_to_id[t] for t in managed if t in title_to_id]
+            managed = (tg.titles() | {t_misc}) - {t_unsorted}
+
+            def present_in(titles, vid):
+                return any(ledger.status(title_to_id[t], vid) == "present" for t in titles if t in title_to_id)
+
             try:
                 for e in list(ledger.present(pid_u)):
                     vid = e["video_id"]
-                    if not any(ledger.status(p, vid) == "present" for p in managed_pids):
+                    _, manual = tg.hits(vid)
+                    # 候補の再生リストがあればそこへの仕分けを待つ。なければどれかに入ったら外す
+                    if not present_in(manual or managed, vid):
                         continue
-                    ch = (catalog.get(vid) or {}).get("channel_id") or e.get("channel_id")
-                    own = rules.favorite_own_title(cfg, ch)
-                    if own and ledger.status(title_to_id.get(own, ""), vid) != "present":
-                        continue  # お気に入りチャンネルの曲は○○チャンネルへの仕分けを待つ
                     if dry_run:
                         rep.add("未仕分けから除外（予定）", e.get("title") or vid)
                         continue
@@ -247,7 +251,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     if cfg.section("dedupe")["enabled"]:
         ents = rules.entity_map(cfg)
         by_id = {v["id"]: v for v in videos}
-        for title in targets:
+        for title in tg.titles():
             pid = title_to_id.get(title)
             if not pid:
                 continue

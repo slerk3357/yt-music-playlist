@@ -7,8 +7,6 @@ from collections import OrderedDict, defaultdict
 
 from .store import Config
 
-ROLE_ORDER = ["top", "favorite", "occasional", "official"]
-SECTIONS = (("top_favorites", "top"), ("favorites", "favorite"), ("occasional", "occasional"))
 
 
 # --------------------------------------------------------------------------
@@ -62,8 +60,15 @@ def matches_channel_ref(text: str | None, refs) -> bool:
 # --------------------------------------------------------------------------
 # 曲の判定と、同一曲・同一バージョンの判定
 # --------------------------------------------------------------------------
+# インスト・オフボーカル・カラオケ音源は常に除外
+BUILTIN_EXCLUDE_RE = re.compile(
+    r"instrumental|\binst\b|off[\s_-]?vocal|オフボーカル|オフボ\b|karaoke|カラオケ|backing track", re.I)
+
+
 def is_music(v: dict, mcfg: dict) -> bool:
     title = v.get("title") or ""
+    if BUILTIN_EXCLUDE_RE.search(unicodedata.normalize("NFKC", title)):
+        return False
     if has_keyword(title, mcfg["exclude_keywords"]):
         return False
     if v.get("live") in ("live", "upcoming"):
@@ -131,8 +136,32 @@ def _preference(v: dict):
 
 
 # --------------------------------------------------------------------------
-# チャンネルの役割と「同じアーティスト」のまとまり
+# チャンネル設定
+#   top_favorites / favorites / occasional の各項目は同じ書式:
+#     name, channel_ids, aliases, playlist_id, other, other_playlist_id, specials[...]
 # --------------------------------------------------------------------------
+TIERS = (("top_favorites", "top"), ("favorites", "favorite"), ("occasional", "occasional"))
+ROLE_ORDER = ["top", "favorite", "occasional", "official", "source"]
+
+
+def tier_entries(cfg: Config):
+    for key, tier in TIERS:
+        for e in cfg.list(key):
+            yield key, tier, e
+
+
+def own_title(cfg: Config, tier: str, e: dict) -> str | None:
+    if tier == "occasional" and not e.get("own"):
+        return None
+    return e.get("playlist") or cfg.title("own", e["name"])
+
+
+def other_title(cfg: Config, tier: str, e: dict) -> str | None:
+    if not e.get("other", tier == "top"):
+        return None
+    return e.get("other_playlist") or cfg.title("other", e["name"])
+
+
 def channel_roles(cfg: Config) -> dict[str, dict]:
     roles: dict[str, dict] = {}
 
@@ -141,26 +170,25 @@ def channel_roles(cfg: Config) -> dict[str, dict]:
         if cur is None or ROLE_ORDER.index(role) < ROLE_ORDER.index(cur["role"]):
             roles[cid] = {"role": role, "name": name}
 
-    for key, role in SECTIONS:
-        for ent in cfg.list(key):
-            for cid in ent.get("channel_ids") or []:
-                put(cid, role, ent["name"])
-    for c in cfg.list("combos"):
-        for cid in c.get("channel_ids") or []:
-            put(cid, "occasional", c.get("playlist"))
+    for _, tier, e in tier_entries(cfg):
+        for cid in e.get("channel_ids") or []:
+            put(cid, tier, e["name"])
     for s in cfg.list("songs"):
         for cid in s.get("official_channel_ids") or []:
             put(cid, "official", s["title"])
+    for _, _, e in tier_entries(cfg):
+        for sp in e.get("specials") or []:
+            for cid in sp.get("published_by") or []:
+                put(cid, "source", sp["playlist"])
     return roles
 
 
 def entity_map(cfg: Config) -> dict[str, str]:
-    """チャンネルID -> 同一アーティストのまとまり（1つの設定項目に並べたチャンネルは同一人物）。"""
+    """チャンネルID -> 同一アーティストのまとまり（1項目の channel_ids は同一人物：本人・サブ・TOPIC）。"""
     ent = {}
-    for key, _ in SECTIONS:
-        for e in cfg.list(key):
-            for cid in e.get("channel_ids") or []:
-                ent.setdefault(cid, f"{key}:{e['name']}")
+    for key, _, e in tier_entries(cfg):
+        for cid in e.get("channel_ids") or []:
+            ent.setdefault(cid, f"{key}:{e['name']}")
     return ent
 
 
@@ -170,14 +198,10 @@ def dedupe(vids: set[str], by_id: dict[str, dict], entity_of) -> set[str]:
     keep = set()
     for vid in vids:
         v = by_id.get(vid)
-        if not v:
+        if not v or not song_key(v)[0]:
             keep.add(vid)
             continue
-        base, tag = song_key(v)
-        if not base:
-            keep.add(vid)
-            continue
-        groups[(entity_of(v.get("channel_id")), base, tag)].append(v)
+        groups[(entity_of(v.get("channel_id")), *song_key(v))].append(v)
     for vs in groups.values():
         keep.add(min(vs, key=_preference)["id"])
     return keep
@@ -192,129 +216,175 @@ def duplicate_groups(vids, by_id, entity_of) -> list[list[str]]:
     return [g for g in groups.values() if len(g) > 1]
 
 
-# --------------------------------------------------------------------------
-# 振り分け先の計算
-# --------------------------------------------------------------------------
-def _apply_overrides(rule: dict, vids: set[str], prefix: str = "") -> set[str]:
-    vids |= set(rule.get(f"{prefix}include_video_ids") or [])
-    vids -= set(rule.get(f"{prefix}exclude_video_ids") or [])
-    return vids
+def handle_channel_ids(cfg: Config) -> set[str]:
+    """@ハンドルを調べる必要のあるチャンネル。"""
+    ids = set()
+    for _, _, e in tier_entries(cfg):
+        ids |= set(e.get("channel_ids") or [])
+        for sp in e.get("specials") or []:
+            ids |= set(sp.get("mentions") or [])
+    return ids
 
 
 def rule_titles(cfg: Config) -> dict[str, dict]:
     """再生リストタイトル -> {"playlist_id": 固定ID or None}"""
     out = {}
-    for t in cfg.list("top_favorites"):
-        out[t.get("playlist") or cfg.title("own", t["name"])] = {"playlist_id": t.get("playlist_id")}
-        out[t.get("other_playlist") or cfg.title("other", t["name"])] = {"playlist_id": t.get("other_playlist_id")}
-    for f in cfg.list("favorites"):
-        out[f.get("playlist") or cfg.title("own", f["name"])] = {"playlist_id": f.get("playlist_id")}
+    for _, tier, e in tier_entries(cfg):
+        if (t := own_title(cfg, tier, e)):
+            out[t] = {"playlist_id": e.get("playlist_id")}
+        if (t := other_title(cfg, tier, e)):
+            out[t] = {"playlist_id": e.get("other_playlist_id")}
+        for sp in e.get("specials") or []:
+            out[sp["playlist"]] = {"playlist_id": sp.get("playlist_id")}
     for s in cfg.list("songs"):
         out[s.get("playlist") or s["title"]] = {"playlist_id": s.get("playlist_id")}
-    for c in cfg.list("combos"):
-        out[c["playlist"]] = {"playlist_id": c.get("playlist_id")}
     ids = cfg.raw.get("playlist_ids") or {}
     for kind in ("unsorted", "misc"):
         out[cfg.title(kind)] = {"playlist_id": ids.get(kind)}
     return out
 
 
-def build_targets(cfg: Config, videos: list[dict], roles: dict[str, dict],
-                  handles: dict[str, str] | None = None) -> "OrderedDict[str, set[str]]":
-    """再生リストタイトル -> 入るべき動画ID集合。"""
+def validate(cfg: Config) -> list[str]:
+    errors = []
+    if cfg.raw.get("combos"):
+        errors.append("combos は廃止されました。各チャンネル項目の specials に移してください（config.example.yaml 参照）")
+    for key, _, e in tier_entries(cfg):
+        if not e.get("channel_ids"):
+            errors.append(f"{key}「{e.get('name')}」に channel_ids がありません")
+        for sp in e.get("specials") or []:
+            if not sp.get("playlist"):
+                errors.append(f"{key}「{e.get('name')}」の specials に playlist がありません")
+    return errors
+
+
+# --------------------------------------------------------------------------
+# 振り分け先の計算
+# --------------------------------------------------------------------------
+class Targets:
+    """auto: 自動で追加する再生リスト / manual: 候補を「未仕分け」に出して人が判断する再生リスト"""
+
+    def __init__(self):
+        self.auto: OrderedDict[str, set[str]] = OrderedDict()
+        self.manual: OrderedDict[str, set[str]] = OrderedDict()
+
+    def put(self, title, vids, auto: bool):
+        (self.auto if auto else self.manual)[title] = vids
+
+    def titles(self) -> set[str]:
+        return set(self.auto) | set(self.manual)
+
+    def hits(self, vid) -> tuple[set[str], set[str]]:
+        return ({t for t, s in self.auto.items() if vid in s},
+                {t for t, s in self.manual.items() if vid in s})
+
+
+def _overrides(rule: dict, vids: set[str], prefix: str = "") -> set[str]:
+    vids = vids | set(rule.get(f"{prefix}include_video_ids") or [])
+    return vids - set(rule.get(f"{prefix}exclude_video_ids") or [])
+
+
+def music_videos(cfg: Config, videos: list[dict]) -> list[dict]:
     mcfg = cfg.section("music")
+    ignore = set(cfg.list("ignore_video_ids"))
+    return [v for v in videos if v["id"] not in ignore and is_music(v, mcfg)]
+
+
+def build_targets(cfg: Config, videos: list[dict], roles: dict[str, dict],
+                  handles: dict[str, str] | None = None) -> Targets:
     use_desc = cfg.section("matching")["use_description"]
     do_dedupe = cfg.section("dedupe")["enabled"]
     ignore = set(cfg.list("ignore_video_ids"))
-    music = [v for v in videos if v["id"] not in ignore and is_music(v, mcfg)]
+    music = music_videos(cfg, videos)
     by_id = {v["id"]: v for v in music}
     ents = entity_map(cfg)
-    category_channels = {c for c, r in roles.items() if r["role"] in ("top", "favorite", "occasional")}
-    targets: OrderedDict[str, set[str]] = OrderedDict()
+    tier_channels = {c for c, r in roles.items() if r["role"] in ("top", "favorite", "occasional")}
+    out = Targets()
 
     def ent_of(extra=None):
         return lambda cid: (extra or {}).get(cid) or ents.get(cid) or cid
 
-    def finish(rule, vids, entity_of, prefix=""):
+    def finish(rule, vids, prefix="", entity_of=None):
         if do_dedupe:
-            vids = dedupe(vids, by_id, entity_of)
-        return _apply_overrides(rule, vids, prefix) - ignore
+            vids = dedupe(vids, by_id, entity_of or ent_of())
+        return _overrides(rule, vids, prefix) - ignore
 
     def text(v):
         return (v.get("title") or "") + ("\n" + (v.get("description") or "") if use_desc else "")
 
-    def related(v, refs, aliases):
-        return (refs and matches_channel_ref(text(v), refs)) or (aliases and matches_alias(text(v), aliases))
-
-    # 特にお気に入りのチャンネル：本人名義は全曲、他チャンネルの関係曲は「その他○○」
-    for t in cfg.list("top_favorites"):
-        own_ids = set(t.get("channel_ids") or [])
+    for _, tier, e in tier_entries(cfg):
+        own_ids = set(e.get("channel_ids") or [])
         refs = channel_refs(own_ids, handles)
-        aliases = t.get("aliases") or []
-        own = {v["id"] for v in music if v.get("channel_id") in own_ids}
-        other = {v["id"] for v in music
-                 if v.get("channel_id") not in own_ids and related(v, refs, aliases)
-                 and not has_keyword(v.get("title"), t.get("exclude_keywords"))}
-        targets[t.get("playlist") or cfg.title("own", t["name"])] = finish(t, own, ent_of())
-        targets[t.get("other_playlist") or cfg.title("other", t["name"])] = finish(t, other, ent_of(), "other_")
+        aliases = e.get("aliases") or []
 
-    # お気に入りの曲：公式＋指定チャンネルのカバー
+        def related(v):
+            return matches_channel_ref(text(v), refs) or (aliases and matches_alias(text(v), aliases))
+
+        own = {v["id"] for v in music if v.get("channel_id") in own_ids}
+        others = {v["id"] for v in music if v.get("channel_id") not in own_ids and related(v)}
+
+        # 特別再生リスト：この人の曲（本人名義＋関係曲）のうち条件を満たすもの
+        in_specials = set()
+        for sp in e.get("specials") or []:
+            pool = own | others if sp.get("require_related", True) else set(by_id)
+            pub = set(sp.get("published_by") or [])
+            mrefs = channel_refs(sp.get("mentions"), handles)
+            malias = sp.get("mention_aliases") or []
+            hit = set()
+            for vid in pool:
+                v = by_id[vid]
+                if pub and v.get("channel_id") not in pub:
+                    continue
+                if (mrefs or malias) and not (matches_channel_ref(text(v), mrefs)
+                                              or (malias and matches_alias(text(v), malias))):
+                    continue
+                if sp.get("keywords") and not has_keyword(v.get("title"), sp["keywords"]):
+                    continue
+                if has_keyword(v.get("title"), sp.get("exclude_keywords")):
+                    continue
+                hit.add(vid)
+            hit = _overrides(sp, hit)
+            in_specials |= hit
+            out.put(sp["playlist"], finish(sp, hit), sp.get("auto", True))
+
+        if (t := own_title(cfg, tier, e)):
+            out.put(t, finish(e, own), e.get("auto", tier == "top"))
+        if (t := other_title(cfg, tier, e)):
+            rest = {v for v in others - in_specials
+                    if not has_keyword(by_id[v].get("title"), e.get("other_exclude_keywords"))}
+            out.put(t, finish(e, rest, "other_"), e.get("other_auto", tier == "top"))
+
+    # お気に入りの曲：公式＋登録チャンネルのカバー
     for s in cfg.list("songs"):
         aliases = list(s.get("aliases") or []) or [s["title"]]
         official = set(s.get("official_channel_ids") or [])
-        allowed = category_channels | official
+        allowed = tier_channels | official
         hit = {v["id"] for v in music
                if v.get("channel_id") in allowed and matches_alias(v.get("title"), aliases)
                and not has_keyword(v.get("title"), s.get("exclude_keywords"))}
         official_ent = {cid: "official:" + s["title"] for cid in official if cid not in ents}
-        targets[s.get("playlist") or s["title"]] = finish(s, hit, ent_of(official_ent))
-
-    # たまに聴くチャンネル × コラボ相手
-    for c in cfg.list("combos"):
-        chans = set(c.get("channel_ids") or [])
-        refs = channel_refs(c.get("partner_channel_ids"), handles)
-        aliases = c.get("partner_aliases") or []
-        hit = {v["id"] for v in music
-               if v.get("channel_id") in chans and (not (refs or aliases) or related(v, refs, aliases))
-               and not has_keyword(v.get("title"), c.get("exclude_keywords"))}
-        targets[c["playlist"]] = finish(c, hit, ent_of({cid: "combo:" + c["playlist"] for cid in chans}))
-    return targets
+        out.put(s.get("playlist") or s["title"], finish(s, hit, entity_of=ent_of(official_ent)), True)
+    return out
 
 
-def handle_channel_ids(cfg: Config) -> set[str]:
-    """@ハンドルを調べる必要のあるチャンネル。"""
-    ids = set()
-    for t in cfg.list("top_favorites"):
-        ids |= set(t.get("channel_ids") or [])
-    for c in cfg.list("combos"):
-        ids |= set(c.get("partner_channel_ids") or [])
-    return ids
+def duplicate_losers(cfg: Config, videos: list[dict]) -> set[str]:
+    """同じ人の同じ曲で、より優先度の高い版（MV等）がすでにある動画。"""
+    music = music_videos(cfg, videos)
+    by_id = {v["id"]: v for v in music}
+    ents = entity_map(cfg)
+    keep = dedupe(set(by_id), by_id, lambda c: ents.get(c) or c)
+    return set(by_id) - keep
 
 
-def managed_titles(cfg: Config, targets) -> set[str]:
-    s = set(targets) | {cfg.title("misc")}
-    for f in cfg.list("favorites"):
-        s.add(f.get("playlist") or cfg.title("own", f["name"]))
-    return s
-
-
-def favorite_own_title(cfg: Config, channel_id: str | None) -> str | None:
-    for f in cfg.list("favorites"):
-        if channel_id in (f.get("channel_ids") or []):
-            return f.get("playlist") or cfg.title("own", f["name"])
-    return None
-
-
-def needs_unsorted(cfg: Config, v: dict, roles: dict, auto_hits: set[str]) -> bool:
-    """新着動画を「未仕分け」に入れるべきか。"""
-    if not is_music(v, cfg.section("music")) or v["id"] in set(cfg.list("ignore_video_ids")):
+def needs_unsorted(cfg: Config, v: dict, roles: dict, auto_hits: set[str], manual_hits: set[str],
+                   losers: set[str]) -> bool:
+    """新着動画を「未仕分け」に仮保存すべきか。"""
+    if v["id"] in losers or v["id"] in set(cfg.list("ignore_video_ids")) \
+            or not is_music(v, cfg.section("music")):
         return False
+    if manual_hits:
+        return True  # 人が判断する再生リストの候補
     role = roles.get(v.get("channel_id"), {}).get("role")
-    if role == "favorite":
-        return True  # お気に入りかどうかは人が判断
-    if role == "occasional":
-        return not auto_hits
-    return False
+    return role in ("favorite", "occasional") and not auto_hits
 
 
 def promotion_candidates(cfg: Config, misc_entries: list[dict], videos: list[dict],
@@ -323,11 +393,10 @@ def promotion_candidates(cfg: Config, misc_entries: list[dict], videos: list[dic
     p = cfg.section("promotion")
     if not p["enabled"]:
         return []
-    mcfg = cfg.section("music")
     ents = entity_map(cfg)
     pool_channels = {c for c, r in roles.items() if r["role"] in ("top", "favorite", "occasional")}
     pool = [(nz(v.get("title")), ents.get(v.get("channel_id"), v.get("channel_id")), song_key(v))
-            for v in videos if v.get("channel_id") in pool_channels and is_music(v, mcfg)]
+            for v in music_videos(cfg, videos) if v.get("channel_id") in pool_channels]
     known = set()
     for s in cfg.list("songs"):
         for a in list(s.get("aliases") or []) + [s["title"]]:

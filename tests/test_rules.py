@@ -38,36 +38,84 @@ def test_channel_ref_matching():
     assert not rules.matches_channel_ref("Vocal: Alice", refs)
 
 
-def test_combo_partner_by_channel(tmp_path):
+def cfg_of(tmp_path, text):
     p = tmp_path / "c.yaml"
-    p.write_text("""
+    p.write_text(text, encoding="utf-8")
+    return Config(p)
+
+
+def test_special_partner_by_channel(tmp_path):
+    cfg = cfg_of(tmp_path, """
 occasional:
   - name: キャロル
     channel_ids: [UCcarol, UCcarol_topic]
-combos:
-  - playlist: キャロルデイブ
-    channel_ids: [UCcarol, UCcarol_topic]
-    partner_channel_ids: [UCdave]
-""", encoding="utf-8")
-    cfg = Config(p)
+    specials:
+      - playlist: キャロルデイブ
+        mentions: [UCdave]
+""")
     vs = [V("c1", "夜の曲 MV", ch="UCcarol", desc="with @dave"),
           V("c2", "夜の曲", ch="UCcarol_topic", ch_title="キャロル - Topic",
             desc="Provided to YouTube by X\n\nfeat. @dave"),
           V("c3", "朝の曲 MV", ch="UCcarol", desc="Dave と一緒に"),
           V("c4", "昼の曲", ch="UCcarol", desc="@dave_fan")]
     t = rules.build_targets(cfg, vs, rules.channel_roles(cfg), {"UCdave": "@dave"})
-    assert t["キャロルデイブ"] == {"c1"}  # c2はc1と重複、c3は名前のみ、c4は別ハンドル
+    assert t.auto["キャロルデイブ"] == {"c1"}  # c2はc1と重複、c3は名前のみ、c4は別ハンドル
+    assert "キャロルチャンネル" not in t.titles()  # たまに聴くチャンネルは既定で○○チャンネルなし
+
+
+NAKURU = """
+top_favorites:
+  - name: 藍月なくる
+    channel_ids: [UCnaku, UCnaku_topic]
+    specials:
+      - playlist: Imyなくちゃ
+        published_by: [UCimy]
+      - playlist: なくるセルフカバー
+        published_by: [UCnaku, UCnaku_topic]
+        keywords: [self cover, セルフカバー]
+favorites:
+  - name: Imy
+    channel_ids: [UCimy]
+    other: true
+"""
+
+
+def test_specials_excluded_from_other(tmp_path):
+    cfg = cfg_of(tmp_path, NAKURU)
+    h = {"UCnaku": "@nakuru", "UCimy": "@imy"}
+    vs = [V("n1", "なくるの曲 MV", ch="UCnaku"),
+          V("n2", "なくるの曲 (Instrumental)", ch="UCnaku"),
+          V("n3", "昔の曲 / 藍月なくる (Self Cover)", ch="UCnaku"),
+          V("i1", "Imyの曲 MV", ch="UCimy", desc="Vocal: @nakuru"),
+          V("i2", "Imyの別の曲 MV", ch="UCimy", desc="Vocal: someone"),
+          V("x1", "他の人の曲", ch="UCx", desc="Vocal @nakuru / Music @imy")]
+    t = rules.build_targets(cfg, vs, rules.channel_roles(cfg), h)
+    assert t.auto["藍月なくるチャンネル"] == {"n1", "n3"}     # インストは除外
+    assert t.auto["なくるセルフカバー"] == {"n3"}
+    assert t.auto["Imyなくちゃ"] == {"i1"}
+    assert t.auto["その他藍月なくる"] == {"x1"}              # 特別再生リスト分(i1)は除外
+    # お気に入りのチャンネルの○○チャンネル・その他○○は「未仕分け」経由（manual）
+    assert t.manual["Imyチャンネル"] == {"i1", "i2"}
+    assert t.manual["その他Imy"] == {"x1"}
+    roles = rules.channel_roles(cfg)
+    x1 = next(v for v in vs if v["id"] == "x1")
+    assert rules.needs_unsorted(cfg, x1, roles, *t.hits("x1"), set())   # その他Imy の候補
+    n1 = vs[0]
+    assert not rules.needs_unsorted(cfg, n1, roles, *t.hits("n1"), set())
+
+
+def test_legacy_combos_rejected(tmp_path):
+    cfg = cfg_of(tmp_path, "combos:\n  - playlist: x\n")
+    assert rules.validate(cfg)
 
 
 def test_promotion_counts_dedupe(tmp_path):
-    p = tmp_path / "c.yaml"
-    p.write_text("""
+    cfg = cfg_of(tmp_path, """
 promotion: {min_versions: 3}
 occasional:
   - {name: A, channel_ids: [UCa, UCa_topic]}
   - {name: B, channel_ids: [UCb]}
-""", encoding="utf-8")
-    cfg = Config(p)
+""")
     vs = [V("1", "夜の曲 MV", ch="UCa"),
           V("2", "夜の曲", ch="UCa_topic", desc="Provided to YouTube by X"),
           V("3", "【cover】夜の曲 / B", ch="UCb")]
