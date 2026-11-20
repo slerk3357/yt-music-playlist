@@ -32,24 +32,34 @@ git remote add upstream https://github.com/slerk3357/yt-music-playlist.git
 git pull upstream main
 ```
 
-### 2. Google Cloud（初回のみ）
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
-2. 「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を有効化
-3. 「OAuth同意画面」を作成（User Type: 外部）。テストユーザーに自分のGoogleアカウントを追加
-4. **公開ステータスを「本番環境」に変更**（「テスト」のままだとトークンが7日で失効します。審査は不要で、承認時に「未確認のアプリ」と表示されるだけです）
-5. 「認証情報」→「OAuthクライアントID」→ 種類「デスクトップアプリ」で作成し、JSONをダウンロード
+### 2. トークン発行用の Apps Script（初回のみ）
+Google Cloud の OAuth 設定の代わりに、Google Apps Script で「YouTube 用のアクセストークンを返すだけのWebアプリ」を作ります。GitHub Actions は実行のたびにここからトークンを受け取ります。
 
-### 3. トークン取得（手元のPCで）
-```bash
-pip install -r requirements.txt google-auth-oauthlib
-python scripts/get_token.py client_secret_xxx.json
-```
-ブラウザで、**再生リストを持っているYouTubeアカウント（ブランドアカウントの場合はそのチャンネル）** を選んで許可します。表示された `YT_CLIENT_ID` `YT_CLIENT_SECRET` `YT_REFRESH_TOKEN` を、リポジトリの Settings → Secrets and variables → Actions に登録します。
+1. [Apps Script](https://script.google.com/) で「新しいプロジェクト」を作成（**再生リストを持っているGoogleアカウント**で）
+2. 左の「プロジェクトの設定」→「「appsscript.json」マニフェスト ファイルをエディタで表示する」にチェック
+3. エディタで `appsscript.json` と `コード.gs` の中身を、このリポジトリの [`gas/appsscript.json`](gas/appsscript.json) と [`gas/Code.gs`](gas/Code.gs) で置き換えて保存
+4. 関数 `setup` を選んで「実行」→ 権限を承認（「このアプリは Google で確認されていません」と出たら「詳細」→「（安全ではないページ）に移動」）
+5. 実行ログを確認
+   - `接続先チャンネル:` が、再生リストを持っているチャンネルであること
+   - `YT_TOKEN_SECRET = ...` の値を控える
+6. 「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、次のユーザーとして実行「自分」、アクセスできるユーザー「全員」でデプロイし、**ウェブアプリのURL**（`https://script.google.com/macros/s/.../exec`）を控える
+
+> **ブランドアカウントの注意：** Apps Script が操作できるのは、そのGoogleアカウント本体のチャンネルだけです。ブランドアカウントのチャンネルで再生リストを管理している場合は、末尾の「別の認証方法」を使ってください。
+
+### 3. GitHub に登録
+非公開リポジトリの Settings → Secrets and variables → Actions に、次の2つを登録します。
+
+| 名前 | 値 |
+|---|---|
+| `YT_TOKEN_URL` | ウェブアプリのURL |
+| `YT_TOKEN_SECRET` | 控えた秘密の文字列 |
+
+URLと秘密の文字列が両方漏れると、あなたのYouTubeを操作できてしまいます。漏れた疑いがあるときは、Apps Script で `rotateSecret` を実行し、`YT_TOKEN_SECRET` を更新してください。
 
 ### 4. 設定ファイル
 今の再生リストから下書きを作れます。
 ```bash
-export YT_CLIENT_ID=... YT_CLIENT_SECRET=... YT_REFRESH_TOKEN=...
+export YT_TOKEN_URL=... YT_TOKEN_SECRET=...
 python -m ytpl.draft_config > config.draft.yaml
 ```
 `config.draft.yaml` と `config.example.yaml` を見比べながら、`config.yaml` を作ってコミットします。特に以下を確認してください。
@@ -97,6 +107,19 @@ python -m ytpl.restore --playlist "アリスチャンネル" --to-new "アリス
 - ショートの判定はAPIにないため、61秒未満または `#shorts` を含むものを除外しています（3分までのショートは取りこぼす場合あり）。
 - 曲名の一致は「タイトルに別名が含まれるか」で判定します。短い曲名や一般的な単語は誤判定しやすいので、`exclude_keywords` で調整してください。
 - 「その他○○」は監視しているチャンネルの動画から探します。それ以外のチャンネルも探すには `search: true` を使います。
+
+## 別の認証方法（自前の OAuth クライアント）
+Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合、またはブランドアカウントを使う場合の方法です（「テスト」状態のままだと、トークンが7日で失効します）。
+
+1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成し、**YouTube Data API v3** を有効化
+2. OAuth 同意画面（Google Auth Platform）を作成（対象：外部）し、公開ステータスを「本番環境」に変更
+3. 「クライアント」→ 種類「デスクトップアプリ」で作成し、JSONをダウンロード
+4. 手元で次を実行し、ブラウザで再生リストを持っているチャンネルを選んで許可
+   ```bash
+   pip install -r requirements.txt google-auth-oauthlib
+   python scripts/get_token.py client_secret_xxx.json
+   ```
+5. 表示された `YT_CLIENT_ID` `YT_CLIENT_SECRET` `YT_REFRESH_TOKEN` を Secrets に登録（`YT_TOKEN_URL` は登録しない）
 
 ## 開発
 ```bash

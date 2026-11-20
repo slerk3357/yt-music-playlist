@@ -31,6 +31,25 @@ def parse_duration(iso: str | None) -> int | None:
     return d * 86400 + h * 3600 + mi * 60 + s
 
 
+def fetch_gas_token(url: str, secret: str) -> str:
+    """Apps Script のWebアプリからアクセストークンを受け取る（約1時間有効）。"""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(url, data=json.dumps({"secret": secret}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:  # 302 リダイレクトは自動で追従
+        text = r.read().decode("utf-8", "replace")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise RuntimeError("トークン発行Webアプリの応答がJSONではありません。"
+                           "デプロイのアクセス権が「全員」になっているか確認してください") from None
+    if "access_token" not in data:
+        raise RuntimeError(f"トークンを取得できません: {data.get('error')}（YT_TOKEN_SECRET を確認）")
+    return data["access_token"]
+
+
 def uploads_playlist_id(channel_id: str) -> str:
     return "UU" + channel_id[2:] if channel_id.startswith("UC") else channel_id
 
@@ -43,17 +62,25 @@ class YouTube:
 
     @classmethod
     def from_env(cls, budget: int) -> "YouTube":
+        """認証情報を環境変数から読む。
+
+        - YT_TOKEN_URL + YT_TOKEN_SECRET: Apps Script のトークン発行Webアプリ（推奨）
+        - YT_CLIENT_ID + YT_CLIENT_SECRET + YT_REFRESH_TOKEN: 自前の OAuth クライアント
+        """
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
-        creds = Credentials(
-            None,
-            refresh_token=os.environ["YT_REFRESH_TOKEN"],
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=os.environ["YT_CLIENT_ID"],
-            client_secret=os.environ["YT_CLIENT_SECRET"],
-            scopes=SCOPES,
-        )
+        if os.environ.get("YT_TOKEN_URL"):
+            creds = Credentials(fetch_gas_token(os.environ["YT_TOKEN_URL"], os.environ["YT_TOKEN_SECRET"]))
+        else:
+            creds = Credentials(
+                None,
+                refresh_token=os.environ["YT_REFRESH_TOKEN"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=os.environ["YT_CLIENT_ID"],
+                client_secret=os.environ["YT_CLIENT_SECRET"],
+                scopes=SCOPES,
+            )
         return cls(build("youtube", "v3", credentials=creds, cache_discovery=False), budget)
 
     # ---- low level -------------------------------------------------------

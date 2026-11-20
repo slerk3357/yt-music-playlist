@@ -29,7 +29,7 @@ jobs:
       - name: Check setup
         id: check
         env:
-          HAS_TOKEN: ${{ secrets.YT_REFRESH_TOKEN != '' }}
+          HAS_TOKEN: ${{ secrets.YT_TOKEN_URL != '' || secrets.YT_REFRESH_TOKEN != '' }}
         run: |
           if [ -f config.yaml ] && [ "$HAS_TOKEN" = "true" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -47,6 +47,8 @@ jobs:
       - name: Sync
         if: steps.check.outputs.ok == 'true'
         env:
+          YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
+          YT_TOKEN_SECRET: ${{ secrets.YT_TOKEN_SECRET }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
