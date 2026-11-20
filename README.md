@@ -57,8 +57,10 @@ Google Cloud の OAuth 設定の代わりに、Google Apps Script で「YouTube 
 URLと秘密の文字列が両方漏れると、あなたのYouTubeを操作できてしまいます。漏れた疑いがあるときは、Apps Script で `rotateSecret` を実行し、`YT_TOKEN_SECRET` を更新してください。
 
 ### 4. 設定ファイル
-今の再生リストから下書きを作れます。
+今の再生リストから下書きを作れます（手元のPCで実行）。
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 export YT_TOKEN_URL=... YT_TOKEN_SECRET=...
 python -m ytpl.draft_config > config.draft.yaml
 ```
@@ -116,6 +118,7 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 3. 「クライアント」→ 種類「デスクトップアプリ」で作成し、JSONをダウンロード
 4. 手元で次を実行し、ブラウザで再生リストを持っているチャンネルを選んで許可
    ```bash
+   python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt google-auth-oauthlib
    python scripts/get_token.py client_secret_xxx.json
    ```
@@ -123,6 +126,7 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 
 ## 開発
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt pytest
 pytest -q                     # 偽APIを使ったテスト
 python -m ytpl.sync --dry-run # 手元で試す（環境変数が必要）
