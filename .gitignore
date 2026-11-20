@@ -1,0 +1,5 @@
+client_secret*.json
+__pycache__/
+.pytest_cache/
+config.draft.yaml
+.venv/

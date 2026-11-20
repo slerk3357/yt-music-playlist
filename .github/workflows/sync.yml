@@ -1,0 +1,63 @@
+name: playlist-sync
+
+on:
+  schedule:
+    - cron: "17 19 * * *"   # 毎日 04:17 JST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "書き込みせず予定だけ表示"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: playlist-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'   # main ブランチ以外では実行しない
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # config.yaml と Secrets が揃っているリポジトリでだけ動く（公開用リポジトリでは何もしない）
+      - name: Check setup
+        id: check
+        env:
+          HAS_TOKEN: ${{ secrets.YT_TOKEN_URL != '' || secrets.YT_REFRESH_TOKEN != '' }}
+        run: |
+          if [ -f config.yaml ] && [ "$HAS_TOKEN" = "true" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::config.yaml または Secrets がないため同期をスキップしました"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.ok == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: steps.check.outputs.ok == 'true'
+        run: pip install -r requirements.txt
+      - name: Sync
+        if: steps.check.outputs.ok == 'true'
+        env:
+          YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
+          YT_TOKEN_SECRET: ${{ secrets.YT_TOKEN_SECRET }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: python -m ytpl.sync ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Commit backup
+        if: steps.check.outputs.ok == 'true' && !inputs.dry_run
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config.yaml data reports
+          git diff --cached --quiet || git commit -m "sync: $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          git push
