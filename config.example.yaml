@@ -11,8 +11,8 @@ quota:
   daily_budget: 9000
 
 playlists:
-  unsorted: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "未仕分け"}
-  misc: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他の曲"}
+  unsorted: {id: "PLexample01xxxxxxxxxxxxxxxxxxxxxxxx", name: "未仕分け"}
+  misc: {id: "PLexample02xxxxxxxxxxxxxxxxxxxxxxxx", name: "その他の曲"}
 
 music:
   categories: ["10"]
@@ -40,25 +40,24 @@ top_favorites:
     channels:
       - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "歌い手A"}
       - {id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "歌い手A - Topic"}
-    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
+    playlist: {id: "PLexample03xxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
     other:
-      playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
+      playlist: {id: "PLexample04xxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
     specials:
       # 作曲者Bが公開した、歌い手Aがボーカルの曲（「その他歌い手A」からは除外される）
+      # published_by は作曲者Bの動画だけが対象（歌い手A本人の動画は含めない）
       - playlist: {name: "作曲者B×歌い手A"}
-        published_by:
-          - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
+        published_by: ["作曲者B"]               # 3分類の name で指定（作曲者Bの channels すべて）
 
 favorites:
   - name: "作曲者B"
     channels:
       - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
-    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "作曲者Bチャンネル"}
+    playlist: {id: "PLexample05xxxxxxxxxxxxxxxxxxxxxxxx", name: "作曲者Bチャンネル"}
     specials:
       # 作曲者B本人が歌ったセルフカバー
       - playlist: {name: "作曲者Bセルフカバー"}   # id がなければ初回に作成し、ここに id を書き込む
-        published_by:
-          - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
+        published_by: ["作曲者B"]
         keywords: ["self cover", "セルフカバー"]
 
 occasional:
@@ -69,13 +68,13 @@ occasional:
       # 歌い手Dの曲のうち、歌い手Eが関わっているもの
       - playlist: {name: "歌い手D×歌い手E"}
         mentions:
-          - {id: "UCeeeeeeeeeeeeeeeeeeeeee", name: "歌い手E"}
+          - {id: "UCeeeeeeeeeeeeeeeeeeeeee", name: "歌い手E"}   # 3分類にない相手は {id, name} で書く
         mention_aliases: ["歌い手E"]
 
 # ===== お気に入りの曲 =====
 songs:
   - name: "曲名X"
-    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "曲名X"}
+    playlist: {id: "PLexample06xxxxxxxxxxxxxxxxxxxxxxxx", name: "曲名X"}
     aliases: ["曲名X", "Kyokumei X"]
     official_channels:
       - {id: "UCffffffffffffffffffffff", name: "曲名Xの公式チャンネル"}

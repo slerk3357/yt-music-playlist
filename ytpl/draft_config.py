@@ -105,7 +105,8 @@ def main():
             for t, cids in e["specials"]:
                 out += [f"      - playlist: {ref(pid[t], t)}"]
                 if len(cids) > 1:
-                    out += ["        mentions:", f"          - {chan(cids[1])}"]
+                    partner = by_cid.get(cids[1])
+                    out += ["        mentions:", f"          - {q(partner) if partner else chan(cids[1])}"]
         return out
 
     for key in ("top_favorites", "favorites", "occasional"):

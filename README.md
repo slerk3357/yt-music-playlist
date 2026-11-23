@@ -94,6 +94,12 @@ python -m ytpl.draft_config > config.draft.yaml
 - `songs` の `aliases` と `official_channels`
 - 「# 要確認」の行
 
+できあがったら、整合性を確認してからコミットします。
+```bash
+python -m ytpl.check                  # エラーがあれば内容を表示
+git config core.hooksPath .githooks   # 以後、config.yaml をコミットするたびに自動で確認
+```
+
 ### 5. 試運転 → 本番
 1. Actions →「playlist-sync」→「Run workflow」（dry_run にチェック）を実行し、サマリーで追加予定を確認
 2. 問題なければ dry_run を外して実行。初回は既存曲の取り込みが多いため、1日約170件ずつ数日かけて追加されます
@@ -101,7 +107,7 @@ python -m ytpl.draft_config > config.draft.yaml
 
 ## ふだんの使い方
 - **「未仕分け」を見て、手動で振り分けてから「未仕分け」から消す**だけです。システムは「未仕分け」から曲を消しません。一度消した曲が、もう一度入ることはありません。
-- チャンネルや曲を増やすときは `config.yaml` を編集してコミットします。新しく追加したチャンネルは、過去の動画もまとめて取り込みます（ただし「未仕分け」には入れません）。
+- チャンネルや曲を増やすときは `config.yaml` を編集してコミットします（コミット前に自動で整合性を確認します）。新しく追加したチャンネルは、過去の動画もまとめて取り込みます（ただし「未仕分け」には入れません）。
 - 自動で昇格した曲は、`config.yaml` の `songs` の末尾に追加されます（`promoted_at` 付き）。取り消すときは、その曲を `songs` から消して `promotion.ignore` に曲名を追加します。
 - `playlist: {name: "…"}` のように id を書かずに再生リストを指定すると、初回の実行で作成して id を書き込みます。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
@@ -154,5 +160,6 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt pytest
 pytest -q                     # 偽APIを使ったテスト
+python -m ytpl.check          # config.yaml の整合性チェック
 python -m ytpl.sync --dry-run # 手元で試す（環境変数が必要）
 ```

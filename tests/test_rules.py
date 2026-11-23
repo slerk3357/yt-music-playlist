@@ -153,8 +153,9 @@ def test_specials_and_other(tmp_path):
           V("d3", "Dの曲3", ch=D, desc="solo")]
     t, idx = targets(cfg, vs, h)
     assert t["歌い手Aチャンネル"].auto == {"s1"}
-    assert t["作曲者B×歌い手A"].auto == {"b1"}             # @ハンドルで確認できた
-    assert t["作曲者B×歌い手A"].cand == {"b4"}             # 名前（aliases）だけ → 未仕分けで確認
+    # published_by あり：作曲者Bの動画だけが対象。@ハンドル(b1)に加え、歌い手Aの aliases(b4)も信用して自動
+    assert t["作曲者B×歌い手A"].auto == {"b1", "b4"}
+    assert t["作曲者B×歌い手A"].cand == set()
     assert t["その他歌い手A"].auto == set()                # 「その他○○」は常に判断
     assert t["その他歌い手A"].cand == {"x1", "x2"}         # 特別再生リスト分(b1, b4)は除外
     assert t["作曲者Bセルフカバー"].auto == {"b3"}
@@ -209,3 +210,77 @@ def test_index_scales():
     idx = rules.Index(cfg, vs)
     idx.mentioning({"@h5"})
     assert time.time() - t0 < 10
+
+
+NAMES = f"""
+top_favorites:
+  - name: "歌い手A"
+    channels:
+      - {{id: "{C('singer')}", name: "歌い手A"}}
+    aliases: ["歌い手A"]
+    specials:
+      - playlist: {{name: "B×A"}}
+        published_by: ["作曲者B"]                 # 名前で指定（作曲者Bの channels すべて）
+      - playlist: {{name: "B×A（Eも参加）"}}
+        published_by: ["作曲者B"]
+        mentions: ["歌い手E"]
+      - playlist: {{name: "AとBの曲"}}
+        published_by: ["歌い手A", "作曲者B"]      # 本人を含めれば本人の曲も対象
+favorites:
+  - name: "作曲者B"
+    channels:
+      - {{id: "{C('composer')}", name: "作曲者B"}}
+      - {{id: "{C('composertopic')}", name: "作曲者B - Topic"}}
+occasional:
+  - name: "歌い手E"
+    channels:
+      - {{id: "{C('e')}", name: "歌い手E"}}
+songs:
+  - name: "曲X"
+    official_channels: ["作曲者B"]
+"""
+
+
+def test_name_references_and_published_by_scope(tmp_path):
+    cfg = cfg_of(tmp_path, NAMES)
+    S, B, BT, E = C("singer"), C("composer"), C("composertopic"), C("e")
+    h = {S: "@singer_a", B: "@composer_b", E: "@singer_e"}
+    vs = [V("s1", "Aの曲 MV", ch=S),
+          V("b1", "Bの曲 MV", ch=B, desc="Vocal: @singer_a"),
+          V("bt1", "Bの別の曲", ch=BT, ch_title="作曲者B - Topic", desc="Provided to YouTube by X\nVocal: 歌い手A"),
+          V("b2", "Bの曲2 MV", ch=B, desc="Vocal: someone"),
+          V("b3", "Bの曲3 MV", ch=B, desc="Vocal: @singer_e"),
+          V("x1", "曲X", ch=B)]
+    t, _ = targets(cfg, vs, h)
+    assert t["B×A"].auto == {"b1", "bt1"}            # 歌い手A本人の曲(s1)は対象外。TOPICも名前指定で含まれる
+    # mentions を書いた場合はその相手で確認（mention_aliases がないので歌い手Aの aliases も使う）
+    assert t["B×A（Eも参加）"].auto == {"b3", "bt1"}
+    assert t["AとBの曲"].auto == {"s1", "b1", "bt1"}    # 本人の曲は関係の確認なしで対象
+    assert t["曲X"].auto == {"x1"}                     # official_channels も名前で指定できる
+    roles = rules.channel_roles(cfg)
+    assert roles[BT]["role"] == "favorite"
+
+
+def test_name_reference_errors(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(NAMES.replace('published_by: ["作曲者B"]                 #', 'published_by: ["作曲者Z"]  #')
+                 .replace("songs:\n", '  - name: "歌い手A"\n    channels: ["作曲者B"]\nsongs:\n'), encoding="utf-8")
+    errs = "\n".join(rules.validate(Config(p)))
+    assert "「作曲者Z」という name" in errs
+    assert "name「歌い手A」が重複" in errs
+    assert "名前による指定はできません" in errs
+
+
+def test_check_script(tmp_path, capsys):
+    from ytpl import check
+    good = tmp_path / "good.yaml"
+    good.write_text(NAMES, encoding="utf-8")
+    assert check.check(good) == 0
+    assert "mention_aliases がないため" in capsys.readouterr().out   # B×A（Eも参加）への警告
+    bad = tmp_path / "bad.yaml"
+    bad.write_text('favorites:\n  - name: B\n    channels: []\n', encoding="utf-8")
+    assert check.check(bad) == 1
+    broken = tmp_path / "broken.yaml"
+    broken.write_text('favorites:\n  - name: "B\n', encoding="utf-8")
+    assert check.check(broken) == 1
+    assert check.check(tmp_path / "none.yaml") == 0

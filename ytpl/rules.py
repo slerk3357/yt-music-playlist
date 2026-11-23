@@ -131,7 +131,33 @@ DEFAULT_NAMES = {"unsorted": "未仕分け", "misc": "その他の曲"}
 
 
 def ids(refs) -> list[str]:
+    """{id, name} オブジェクトのリストからIDを取り出す（3分類の channels 用。名前による指定は不可）。"""
     return [r["id"] for r in refs or [] if isinstance(r, dict) and r.get("id")]
+
+
+def entry_channels(cfg: Config) -> dict[str, list[str]]:
+    """3分類の項目の name -> その項目の channels のID。"""
+    out: dict[str, list[str]] = {}
+    for _, _, _, e in tier_entries(cfg):
+        if isinstance(e.get("name"), str):
+            out.setdefault(e["name"], ids(e.get("channels")))
+    return out
+
+
+def chan_ids(cfg: Config, refs) -> list[str]:
+    """チャンネル指定のリストをIDに展開する。
+
+    要素は {id, name} オブジェクト、または3分類の項目の name（文字列）。name の場合は、
+    その項目の channels（本人・サブ・TOPIC）すべてを指す。
+    """
+    by_name = entry_channels(cfg)
+    out: list[str] = []
+    for r in refs or []:
+        if isinstance(r, dict) and r.get("id"):
+            out.append(r["id"])
+        elif isinstance(r, str):
+            out += by_name.get(r, [])
+    return list(dict.fromkeys(out))
 
 
 def tier_entries(cfg: Config):
@@ -176,11 +202,11 @@ def channel_roles(cfg: Config) -> dict[str, dict]:
         for cid in ids(e.get("channels")):
             put(cid, tier, e["name"])
     for s in cfg.songs():
-        for cid in ids(s.get("official_channels")):
+        for cid in chan_ids(cfg, s.get("official_channels")):
             put(cid, "official", s["name"])
     for _, _, _, e in tier_entries(cfg):
         for sp in e.get("specials") or []:
-            for cid in ids(sp.get("published_by")):
+            for cid in chan_ids(cfg, sp.get("published_by")):
                 put(cid, "source", (sp.get("playlist") or {}).get("name"))
     return roles
 
@@ -200,7 +226,7 @@ def handle_channel_ids(cfg: Config) -> set[str]:
     for _, _, _, e in tier_entries(cfg):
         out |= set(ids(e.get("channels")))
         for sp in e.get("specials") or []:
-            out |= set(ids(sp.get("mentions")))
+            out |= set(chan_ids(cfg, sp.get("mentions")))
     return out
 
 
@@ -242,10 +268,25 @@ def validate(cfg: Config) -> list[str]:
             if isinstance(obj, dict) and old in obj:
                 errors.append(f"{where}{old} は廃止されました → {new}")
 
-    def check_channels(refs, where, required=False):
+    names = [e.get("name") for _, _, _, e in tier_entries(cfg)]
+    dup = sorted({n for n in names if isinstance(n, str) and names.count(n) > 1})
+    for n in dup:
+        errors.append(f"3分類の name「{n}」が重複しています（name は一意にしてください）")
+    known_names = set(entry_channels(cfg))
+
+    def check_channels(refs, where, required=False, allow_names=True):
         if required and not refs:
             errors.append(f"{where}: チャンネルがありません")
+        if refs is not None and not isinstance(refs, list):
+            errors.append(f"{where}: リストで書いてください")
+            return
         for i, r in enumerate(refs or []):
+            if isinstance(r, str):
+                if not allow_names:
+                    errors.append(f"{where}[{i}]: ここでは名前による指定はできません。{{id, name}} で書いてください: {r}")
+                elif r not in known_names:
+                    errors.append(f"{where}[{i}]: 「{r}」という name の項目が3分類にありません")
+                continue
             if not isinstance(r, dict) or not r.get("id") or not r.get("name"):
                 errors.append(f"{where}[{i}]: チャンネルは id と name の両方が必要です")
             elif not UC_RE.match(r["id"]):
@@ -270,7 +311,7 @@ def validate(cfg: Config) -> list[str]:
         legacy(e, LEGACY_ENTRY, f"{w}.")
         if not e.get("name"):
             errors.append(f"{w}: name がありません")
-        check_channels(e.get("channels"), f"{w}.channels", required=True)
+        check_channels(e.get("channels"), f"{w}.channels", required=True, allow_names=False)
         check_pl(e.get("playlist"), f"{w}.playlist")
         other = e.get("other")
         if other is not None:
@@ -468,15 +509,36 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         # 特別再生リスト：対象範囲のうち、書かれた条件をすべて満たすもの
         in_specials = set()
         for j, sp in enumerate(e.get("specials") or []):
-            pools = (own | verified, by_name) if sp.get("require_related", True) else (set(idx.r), set())
+            pub = chan_ids(cfg, sp.get("published_by"))
+            m_ids = chan_ids(cfg, sp.get("mentions"))
+            m_alias = sp.get("mention_aliases")
+
+            def mentioned(h, m_ids=m_ids, m_alias=m_alias):
+                return (h & idx.mentioning(ref_tokens(m_ids, handles))) | idx.alias_hits(m_alias, among=h)
+
+            if not sp.get("require_related", True):
+                # 関係の確認なし：published_by（なければ全動画）を対象に、書いた条件だけで判定
+                h = idx.channels(pub) if pub else set(idx.r)
+                if m_ids or m_alias:
+                    h = mentioned(h)
+                pools = (h, set())
+            elif pub:
+                # published_by あり：指定チャンネルの動画だけが対象。関係は mentions（既定：この人）と
+                # mention_aliases（既定：この人の aliases）で確認する。範囲が絞られているので名前一致も信用する
+                h = idx.channels(pub)
+                alias = m_alias if m_alias else e.get("aliases")
+                if m_ids:
+                    h = mentioned(h, m_ids, alias)
+                else:
+                    h = (h & own) | mentioned(h, own_ids, alias)
+                pools = (h, set())
+            else:
+                # published_by なし：この人の曲（本人名義＋関係曲）が対象
+                pools = []
+                for pool in (own | verified, by_name):
+                    pools.append(mentioned(pool) if (m_ids or m_alias) else pool)
             hits = []
-            for pool in pools:
-                h = pool
-                if sp.get("published_by"):
-                    h = h & idx.channels(ids(sp["published_by"]))
-                if sp.get("mentions") or sp.get("mention_aliases"):
-                    h = (h & idx.mentioning(ref_tokens(ids(sp.get("mentions")), handles))) \
-                        | idx.alias_hits(sp.get("mention_aliases"), among=h)
+            for h in pools:
                 if sp.get("keywords"):
                     h = idx.title_has(sp["keywords"], h)
                 if sp.get("exclude_keywords"):
@@ -502,7 +564,7 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
 
     # お気に入りの曲：公式＋登録チャンネルのカバー（自動）
     for i, s in enumerate(cfg.songs()):
-        official = set(ids(s.get("official_channels")))
+        official = set(chan_ids(cfg, s.get("official_channels")))
         pool = idx.channels(tier_channels | official)
         hit = idx.alias_hits(list(s.get("aliases") or []) or [s["name"]], among=pool, field="tz")
         if s.get("exclude_keywords"):
