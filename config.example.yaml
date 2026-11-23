@@ -9,6 +9,7 @@ playlist_privacy: "private"     # 新しく作る再生リストの公開設定
 
 quota:
   daily_budget: 9000
+  write_reserve: 2000           # 曲の追加のために残しておく量
 
 playlists:
   unsorted: {id: "PLexample01xxxxxxxxxxxxxxxxxxxxxxxx", name: "未仕分け"}
@@ -33,6 +34,10 @@ promotion:
   ignore: []
 
 ignore_video_ids: []
+
+# 管理外にする再生リスト（バックアップもしない）
+ignore_playlists:
+  - {id: "PLexample90xxxxxxxxxxxxxxxxxxxxxxxx", name: "作業用"}
 
 # ===== チャンネル =====
 top_favorites:

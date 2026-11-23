@@ -190,6 +190,29 @@ def fixed_playlists(cfg: Config) -> dict[str, PL]:
     return {k: _pl({"name": DEFAULT_NAMES[k], **(ps.get(k) or {})}, k, True, ("playlists", k)) for k in DEFAULT_NAMES}
 
 
+def declared_playlists(cfg: Config) -> list[PL]:
+    """config.yaml に書かれた再生リスト（読み取りなしで分かるもの）。other.playlist は作成しないので creatable=False。"""
+    out = list(fixed_playlists(cfg).values())
+    for key, tier, i, e in tier_entries(cfg):
+        for j, sp in enumerate(e.get("specials") or []):
+            if sp.get("playlist"):
+                out.append(_pl(sp["playlist"], f"special:{key}:{i}:{j}", sp.get("auto", True),
+                               (key, i, "specials", j, "playlist")))
+        if e.get("playlist"):
+            out.append(_pl(e["playlist"], f"own:{key}:{i}", e.get("auto", tier == "top"), (key, i, "playlist")))
+        op = (e.get("other") or {}).get("playlist")
+        if op:
+            out.append(_pl(op, f"other:{key}:{i}", False, (key, i, "other", "playlist"), creatable=False))
+    for i, s in enumerate(cfg.songs()):
+        out.append(_pl({"name": s.get("name") or f"songs[{i}]", **(s.get("playlist") or {})}, f"song:{i}", True,
+                       ("songs", i, "playlist")))
+    return [p for p in out if p]
+
+
+def ignored_playlist_ids(cfg: Config) -> set[str]:
+    return {r["id"] for r in cfg.list("ignore_playlists") if isinstance(r, dict) and r.get("id")}
+
+
 def channel_roles(cfg: Config) -> dict[str, dict]:
     roles: dict[str, dict] = {}
 
@@ -304,6 +327,19 @@ def validate(cfg: Config) -> list[str]:
             errors.append(f"{where}: 再生リストIDの形式が違います: {ref['id']}")
 
     legacy(cfg.raw, LEGACY_TOP, "")
+    ign = cfg.raw.get("ignore_playlists")
+    if ign is not None and not isinstance(ign, list):
+        errors.append("ignore_playlists: リストで書いてください")
+    for i, r in enumerate(ign or []):
+        if not isinstance(r, dict) or not r.get("id") or not r.get("name"):
+            errors.append(f"ignore_playlists[{i}]: 再生リストは id と name の両方が必要です")
+        elif not PL_RE.match(r["id"]):
+            errors.append(f"ignore_playlists[{i}]: 再生リストIDの形式が違います: {r['id']}")
+    ignored = ignored_playlist_ids(cfg)
+    if ignored:
+        for pl in declared_playlists(cfg):
+            if pl.id in ignored:
+                errors.append(f"再生リスト {pl.id}（{pl.name}）は ignore_playlists にあるため、ほかの場所では使えません")
     for kind in DEFAULT_NAMES:
         check_pl((cfg.raw.get("playlists") or {}).get(kind), f"playlists.{kind}")
     for key, _, i, e in tier_entries(cfg):
@@ -465,6 +501,7 @@ class Target:
     pl: PL
     auto: set = field(default_factory=set)     # 自動で追加する動画
     cand: set = field(default_factory=set)     # 「未仕分け」に仮保存して人が判断する候補
+    inc: set = field(default_factory=set)      # include_video_ids（手動の指定）
 
 
 def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
@@ -498,7 +535,7 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         if do_dedupe:
             kept = dedupe(auto | cand, idx, entity_of or ent_of())
             auto, cand = auto & kept, cand & kept
-        out.append(Target(pl, auto | inc, cand - inc))
+        out.append(Target(pl, auto | inc, cand - inc, inc))
 
     for key, tier, i, e in tier_entries(cfg):
         own_ids = ids(e.get("channels"))

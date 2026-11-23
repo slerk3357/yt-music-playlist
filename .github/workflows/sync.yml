@@ -3,6 +3,10 @@ name: playlist-sync
 on:
   schedule:
     - cron: "17 19 * * *"   # 毎日 04:17 JST
+  # config.yaml を変更したら、id のない再生リストをすぐ作る（作成だけ。読み取り・追加はしない）
+  push:
+    branches: [main]
+    paths: ["config.yaml"]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -52,7 +56,10 @@ jobs:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-        run: python -m ytpl.sync ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: >-
+          python -m ytpl.sync
+          ${{ github.event_name == 'push' && '--create-only' || '' }}
+          ${{ inputs.dry_run && '--dry-run' || '' }}
       - name: Commit backup
         if: steps.check.outputs.ok == 'true' && !inputs.dry_run
         run: |

@@ -35,7 +35,7 @@ def dump_yaml(path: Path, data) -> None:
 # --------------------------------------------------------------------------
 DEFAULTS = {
     "playlist_privacy": "private",
-    "quota": {"daily_budget": 9000},
+    "quota": {"daily_budget": 9000, "write_reserve": 2000},
     "playlists": {"unsorted": {"name": "未仕分け"}, "misc": {"name": "その他の曲"}},
     "music": {
         "categories": ["10"],

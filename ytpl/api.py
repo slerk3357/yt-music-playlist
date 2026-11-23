@@ -7,6 +7,7 @@ import time
 
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 COST = {"list": 1, "insert": 50, "delete": 50, "search": 100}
+CREATED_MARK = "yt-playlist-sync により自動作成"
 
 
 class QuotaExceeded(Exception):
@@ -84,6 +85,10 @@ class YouTube:
         return cls(build("youtube", "v3", credentials=creds, cache_discovery=False), budget)
 
     # ---- low level -------------------------------------------------------
+    @property
+    def remaining(self) -> int:
+        return self.budget - self.used
+
     def can_afford(self, kind: str) -> bool:
         return self.used + COST[kind] <= self.budget
 
@@ -115,6 +120,7 @@ class YouTube:
                 part="snippet,contentDetails", mine=True, maxResults=50, pageToken=token), "list")
             for it in r.get("items", []):
                 out.append({"id": it["id"], "title": it["snippet"]["title"],
+                            "description": it["snippet"].get("description") or "",
                             "count": it["contentDetails"].get("itemCount")})
             token = r.get("nextPageToken")
             if not token:
@@ -189,7 +195,7 @@ class YouTube:
     # ---- write -----------------------------------------------------------
     def create_playlist(self, title: str, privacy: str) -> str:
         r = self._exec(self.s.playlists().insert(part="snippet,status", body={
-            "snippet": {"title": title, "description": "yt-playlist-sync により自動作成"},
+            "snippet": {"title": title, "description": CREATED_MARK},
             "status": {"privacyStatus": privacy},
         }), "insert")
         return r["id"]

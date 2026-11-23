@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ytpl import rules
-from ytpl.api import COST, QuotaExceeded, YouTube, uploads_playlist_id
+from ytpl.api import COST, CREATED_MARK, QuotaExceeded, YouTube, uploads_playlist_id
 from ytpl.store import Config, load_yaml
 from ytpl.sync import run
 
@@ -35,7 +35,8 @@ class FakeYouTube(YouTube):
 
     def my_playlists(self):
         self._spend("list")
-        return [{"id": k, "title": p["title"], "count": len(p["items"])} for k, p in self.pl.items()]
+        return [{"id": k, "title": p["title"], "description": p.get("description", ""), "count": len(p["items"])}
+                for k, p in self.pl.items()]
 
     def playlist_pages(self, pid):
         if pid.startswith("UU"):
@@ -67,7 +68,7 @@ class FakeYouTube(YouTube):
         self._spend("insert")
         self.n += 1
         pid = f"PLnew{self.n}"
-        self.pl[pid] = {"title": title, "items": []}
+        self.pl[pid] = {"title": title, "items": [], "description": CREATED_MARK}
         return pid
 
     def add_item(self, pid, vid):
@@ -193,7 +194,7 @@ def test_first_run_and_incremental(tmp_path):
     t = titles(yt)
     # b2: お気に入りの○○チャンネル候補 / d3: どこにも入らない / c6: 名前だけで一致 / c7: その他アリス候補
     # d5: オフボーカルは含める設定の再生リストがないので入れない
-    assert t["未仕分け"] == ["b2", "d3", "c6", "c7"]
+    assert t["未仕分け"] == ["c7", "c6", "d3", "b2"]       # 新しい順
     assert t["その他アリス"] == []
     assert "d4" in t["星の歌"] and "a5" in t["アリスチャンネル"]
     assert len(set(t["星の歌"])) == len(t["星の歌"])     # 2回目以降も二重追加しない
@@ -203,7 +204,7 @@ def test_first_run_and_incremental(tmp_path):
     yt.pl["PLalice"]["items"].remove("a2")
     run(yt=yt, now=day(2, 11), **kw(tmp_path))
     t = titles(yt)
-    assert t["未仕分け"] == ["b2", "d3", "c6", "c7"]
+    assert t["未仕分け"] == ["c7", "c6", "d3", "b2"]
     assert "a2" not in t["アリスチャンネル"]            # 手で消した曲は戻さない
     led = load_yaml(tmp_path / "data/playlists/アリスチャンネル.yaml")
     assert {e["video_id"]: e["status"] for e in led["items"]}["a2"] == "missing"
@@ -220,8 +221,8 @@ def test_user_removed_from_unsorted_is_not_readded(tmp_path):
 
 
 def test_quota_carry_over(tmp_path):
-    yt = setup(tmp_path)
-    yt.budget = 60 + 50 * 3
+    yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\npromotion:"))
+    yt.budget = 30 + 50 * 2 + 50 * 3       # 読み取り・再生リスト2つの作成・追加3件分
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     pending = sum(1 for p in (tmp_path / "data/playlists").glob("*.yaml")
                   for e in load_yaml(p)["items"] if e["status"] == "pending")
@@ -278,3 +279,80 @@ def test_no_delete_api():
     assert not hasattr(YouTube, "delete_item")
     assert uploads_playlist_id("UCabc") == "UUabc"
     assert rules.extract_song_title("【歌ってみた】「夜に駆ける」/ 誰か") == "夜に駆ける"
+
+
+def test_playlists_created_first_even_without_quota_for_reads(tmp_path):
+    """読み取りでクォータが尽きても、再生リストの作成は先に終わっている。"""
+    yt = setup(tmp_path)
+    yt.budget = 1 + 50 * 2                  # 一覧の取得と、再生リスト2つの作成だけ
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    t = titles(yt)
+    assert t["星の歌"] == [] and t["キャロルとデイブ"] == []
+    cfg = Config(tmp_path / "config.yaml")
+    assert cfg.raw["songs"][0]["playlist"]["id"].startswith("PLnew")
+
+
+def test_create_only_and_no_duplicate(tmp_path):
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
+    t = titles(yt)
+    assert t["星の歌"] == [] and t["キャロルとデイブ"] == []      # 作成だけ。中身は追加しない
+    assert yt.used == 1 + 50 * 2
+    # config.yaml への書き戻しが失われた（push失敗など）場合でも、二重に作らない
+    (tmp_path / "config.yaml").write_text(CONFIG, encoding="utf-8")
+    run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
+    assert sum(1 for p in yt.pl.values() if p["title"] == "星の歌") == 1
+    assert Config(tmp_path / "config.yaml").raw["songs"][0]["playlist"]["id"].startswith("PLnew")
+
+
+def test_new_songs_before_backlog(tmp_path):
+    """新曲（未仕分け・○○チャンネル）が、取り込み待ちより先に追加される。"""
+    yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\npromotion:"))
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    # 新しい曲名を songs に足す（過去の曲が取り込み待ちになる）と同時に、新曲を2つ公開
+    cfg = (tmp_path / "config.yaml").read_text(encoding="utf-8") + '  - name: "朝の曲"\n'
+    (tmp_path / "config.yaml").write_text(cfg, encoding="utf-8")
+    yt.v["a6"] = V("a6", "『花の曲』アリス MV", A, "03-01")
+    yt.v["d6"] = V("d6", "別の曲 / デイブ", D, "03-02")
+    yt.used, yt.budget = 0, 0
+    reads = 40
+    yt.budget = reads + 50 * 1 + 50 * 2        # 再生リスト「朝の曲」の作成＋新曲2件だけ
+    run(yt=yt, now=day(3, 10), **kw(tmp_path))
+    t = titles(yt)
+    assert "a6" in t["アリスチャンネル"] and "d6" in t["未仕分け"]
+    assert t["朝の曲"] == []                    # 取り込み待ち（c3）は次回
+    yt.used, yt.budget = 0, 10000
+    run(yt=yt, now=day(3, 11), **kw(tmp_path))
+    assert titles(yt)["朝の曲"] == ["c3"]
+
+
+def test_reserve_defers_new_channel_and_optional_backup(tmp_path):
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    yt.pl["PLother"] = {"title": "管理外の再生リスト", "items": ["a1"]}
+    cfg = (tmp_path / "config.yaml").read_text(encoding="utf-8").replace(
+        "occasional:", f'occasional:\n  - name: "エド"\n    channels: [{{id: "{C("ed")}", name: "エド"}}]')
+    (tmp_path / "config.yaml").write_text(cfg, encoding="utf-8")
+    yt.v["e1"] = V("e1", "エドの曲", C("ed"), "01-01")
+    yt.used, yt.budget = 0, 2000 + 9           # 一覧1＋管理対象8件のバックアップ分だけ予約枠の外
+    text = run(yt=yt, now=day(2, 10), **kw(tmp_path))
+    assert "次回以降に取り込むチャンネル" in text and "エド" in text
+    assert "今回バックアップしなかった再生リスト" in text and "管理外の再生リスト" in text
+    yt.used, yt.budget = 0, 10000
+    run(yt=yt, now=day(2, 11), **kw(tmp_path))
+    assert (tmp_path / "data/playlists/管理外の再生リスト.yaml").exists()
+    assert "e1" in {v for ch in __import__("ytpl.store", fromlist=["x"]).Catalog(tmp_path / "data/catalog").channels.values()
+                    for v in ch["videos"]}
+
+
+def test_ignore_playlists(tmp_path):
+    cfg = CONFIG.replace("promotion:", 'ignore_playlists:\n  - {id: "PLprivate", name: "個人用"}\npromotion:')
+    yt = setup(tmp_path, cfg)
+    yt.pl["PLprivate"] = {"title": "個人用", "items": ["a1"]}
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    assert not (tmp_path / "data/playlists/個人用.yaml").exists()
+    bad = cfg.replace('playlist: {id: "PLbob", name: "ボブチャンネル"}', 'playlist: {id: "PLprivate", name: "ボブチャンネル"}')
+    (tmp_path / "config.yaml").write_text(bad, encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        run(yt=yt, now=day(1, 11), **kw(tmp_path))
+    assert "ignore_playlists" in str(e.value)
