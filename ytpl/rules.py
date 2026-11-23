@@ -97,7 +97,7 @@ def version_tag(title: str) -> str:
     segs = [a or b or c for a, b, c in re.findall(r"【([^】]*)】|\[([^\]]*)\]|\(([^)]*)\)", t)]
     rest = re.sub(r"【[^】]*】|\[[^\]]*\]|\([^)]*\)", " ", t)
     segs += re.split(r"\s*[/|]\s*|\s+-\s+|\s*[~〜]\s*", rest)
-    tags = {"offvocal"} if OFF_VOCAL_RE.search(t) else set()
+    tags = set()   # オフボーカル表記はバージョンに含めない（通常版と同じ曲として扱う）
     for s in segs:
         s = OFF_VOCAL_RE.sub(" ", s)
         if VERSION_RE.search(s) and not (NOT_VERSION_RE.search(s) and not re.search(r"remix|ver\b|version", s, re.I)):
@@ -391,7 +391,7 @@ def dedupe(vids, idx: Index, entity_of) -> set[str]:
     """同じアーティストの同じ曲・同じバージョンは1本だけ残す。
 
     優先順：MV → 通常の動画 → TOPIC音源 → 本チャンネルのオフボーカル → TOPICのオフボーカル（同順位は古い順）。
-    オフボーカルは version_tag で別バージョン扱いなので、通常版と同じグループにはならない。
+    オフボーカルは通常版と同じグループなので、通常版があればオフボーカルは残らない。
     """
     best: dict[tuple, tuple] = {}
     keep = set()
@@ -437,12 +437,21 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
     def ent_of(extra=None):
         return lambda cid: (extra or {}).get(cid) or ents.get(cid) or cid
 
-    def emit(pl: PL, verified: set, unverified: set, rule: dict, entity_of=None):
+    # 通常版（オフボーカルでない版）がある「人×曲×バージョン」。オフボーカルはここにないときだけ入れる
+    has_vocal = {(ents.get(r.ch) or r.ch, r.key) for r in idx.r.values() if not r.off and r.key[0]}
+
+    def off_allowed(entity_of, extra_vocal=frozenset()):
+        return {vid for vid in off
+                if idx.r[vid].key[0]
+                and (entity_of(idx.r[vid].ch), idx.r[vid].key) not in has_vocal
+                and (entity_of(idx.r[vid].ch), idx.r[vid].key) not in extra_vocal}
+
+    def emit(pl: PL, verified: set, unverified: set, rule: dict, entity_of=None, extra_vocal=frozenset()):
         """verified は pl.auto に従って自動/候補へ。unverified（名前一致のみ）は常に候補へ。"""
         inc = set(rule.get("include_video_ids") or [])
         exc = set(rule.get("exclude_video_ids") or [])
-        if not rule.get("include_off_vocal"):
-            verified, unverified = verified - off, unverified - off
+        drop = off - off_allowed(entity_of or ent_of(), extra_vocal) if rule.get("include_off_vocal") else off
+        verified, unverified = verified - drop, unverified - drop
         auto = (verified if pl.auto else set()) - exc
         cand = ((set() if pl.auto else verified) | unverified) - exc - auto
         if do_dedupe:
@@ -499,8 +508,11 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         if s.get("exclude_keywords"):
             hit -= idx.title_has(s["exclude_keywords"], hit)
         ref = {"name": s["name"], **(s.get("playlist") or {})}
+        off_ent = {c: "official:" + s["name"] for c in official if c not in ents}
+        extra = frozenset((off_ent[c], idx.r[v].key) for c in off_ent for v in idx.by_ch.get(c, ())
+                          if not idx.r[v].off)
         emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), hit, set(), s,
-             entity_of=ent_of({c: "official:" + s["name"] for c in official if c not in ents}))
+             entity_of=ent_of(off_ent), extra_vocal=extra)
     return out
 
 

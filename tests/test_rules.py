@@ -38,31 +38,45 @@ def test_off_vocal_detection():
     for t in ["曲 (Instrumental)", "曲 (Off Vocal)", "曲 off vocal ver.", "曲 (Inst.)", "曲 カラオケ", "曲 オフボーカル"]:
         assert rules.is_off_vocal(t), t
     assert not rules.is_off_vocal("Instagram告知の曲")
-    assert rules.version_tag("曲 (Remix) [Off Vocal]") == rules.version_tag("曲 (Remix Off Vocal)") == "offvocal+remix"
+    # オフボーカル表記はバージョンに含めない（通常版と同じ曲）
+    assert rules.version_tag("曲 (Off Vocal)") == rules.version_tag("曲") == ""
+    assert rules.version_tag("曲 (Remix) [Off Vocal]") == rules.version_tag("曲 (Remix Off Vocal)") == "remix"
 
 
-def test_off_vocal_option_and_priority(tmp_path):
+def test_off_vocal_only_when_no_vocal(tmp_path):
     base = f"""
 top_favorites:
   - name: "A"
     channels: [{{id: "{C('a')}", name: "A"}}, {{id: "{C('at')}", name: "A - Topic"}}]
     playlist: {{name: "Aチャンネル"}}
-    specials:
-      - playlist: {{name: "Aのオフボーカル"}}
-        keywords: ["off vocal"]
-        include_off_vocal: true
 """
     topic = dict(ch=C("at"), ch_title="A - Topic", desc="Provided to YouTube by Label")
     vs = [V("mv", "A『星の歌』MV", day="02"),
-          V("ov", "星の歌 (Off Vocal)", day="03"),
-          V("ovt", "星の歌 (Off Vocal)", day="01", **topic),
-          V("ovr", "星の歌 (Remix) [Off Vocal]", **topic)]
+          V("ov", "星の歌 (Off Vocal)", day="03"),              # 通常版(mv)がある → 入れない
+          V("rmx_ovt", "星の歌 (Remix) [Off Vocal]", day="01", **topic),
+          V("rmx_ov", "星の歌 (Remix Off Vocal)", day="05"),   # Remixの通常版はない → 本チャンネル版を優先
+          V("only_ovt", "風の歌 (Instrumental)", **topic)]     # 通常版がない → 入れる
     t, _ = targets(cfg_of(tmp_path, base), vs, {})
     assert t["Aチャンネル"].auto == {"mv"}                      # 既定では含めない
-    assert t["Aのオフボーカル"].auto == {"ov", "ovr"}           # 本チャンネル版 > TOPIC版、Remixは別バージョン
     t, _ = targets(cfg_of(tmp_path, base.replace('playlist: {name: "Aチャンネル"}',
                                                  'playlist: {name: "Aチャンネル"}\n    include_off_vocal: true')), vs, {})
-    assert t["Aチャンネル"].auto == {"mv", "ov", "ovr"}
+    assert t["Aチャンネル"].auto == {"mv", "rmx_ov", "only_ovt"}
+
+
+def test_off_vocal_vocal_found_elsewhere(tmp_path):
+    """通常版が特別再生リストの条件に合わなくても、存在すればオフボーカルは入れない。"""
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{C('a')}", name: "A"}}]
+    specials:
+      - playlist: {{name: "Aのインスト"}}
+        keywords: ["off vocal", "instrumental"]
+        include_off_vocal: true
+""")
+    vs = [V("mv", "星の歌 MV"), V("ov", "星の歌 (Off Vocal)"), V("ov2", "風の歌 (Instrumental)")]
+    t, _ = targets(cfg, vs, {})
+    assert t["Aのインスト"].auto == {"ov2"}
 
 
 def test_dedupe_prefers_mv_and_keeps_versions(tmp_path):
