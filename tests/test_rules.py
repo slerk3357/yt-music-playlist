@@ -34,11 +34,35 @@ def test_version_tag():
     assert rules.version_tag("星の歌 (X Remix)") != rules.version_tag("星の歌 (Y Remix)")
 
 
-def test_builtin_exclusions():
-    m = {"exclude_keywords": [], "include_keywords": [], "categories": ["10"], "min_seconds": 61, "max_seconds": 900}
+def test_off_vocal_detection():
     for t in ["曲 (Instrumental)", "曲 (Off Vocal)", "曲 off vocal ver.", "曲 (Inst.)", "曲 カラオケ", "曲 オフボーカル"]:
-        assert not rules.is_music(V("x", t), m), t
-    assert rules.is_music(V("x", "Instagram告知の曲"), m)
+        assert rules.is_off_vocal(t), t
+    assert not rules.is_off_vocal("Instagram告知の曲")
+    assert rules.version_tag("曲 (Remix) [Off Vocal]") == rules.version_tag("曲 (Remix Off Vocal)") == "offvocal+remix"
+
+
+def test_off_vocal_option_and_priority(tmp_path):
+    base = f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{C('a')}", name: "A"}}, {{id: "{C('at')}", name: "A - Topic"}}]
+    playlist: {{name: "Aチャンネル"}}
+    specials:
+      - playlist: {{name: "Aのオフボーカル"}}
+        keywords: ["off vocal"]
+        include_off_vocal: true
+"""
+    topic = dict(ch=C("at"), ch_title="A - Topic", desc="Provided to YouTube by Label")
+    vs = [V("mv", "A『星の歌』MV", day="02"),
+          V("ov", "星の歌 (Off Vocal)", day="03"),
+          V("ovt", "星の歌 (Off Vocal)", day="01", **topic),
+          V("ovr", "星の歌 (Remix) [Off Vocal]", **topic)]
+    t, _ = targets(cfg_of(tmp_path, base), vs, {})
+    assert t["Aチャンネル"].auto == {"mv"}                      # 既定では含めない
+    assert t["Aのオフボーカル"].auto == {"ov", "ovr"}           # 本チャンネル版 > TOPIC版、Remixは別バージョン
+    t, _ = targets(cfg_of(tmp_path, base.replace('playlist: {name: "Aチャンネル"}',
+                                                 'playlist: {name: "Aチャンネル"}\n    include_off_vocal: true')), vs, {})
+    assert t["Aチャンネル"].auto == {"mv", "ov", "ovr"}
 
 
 def test_dedupe_prefers_mv_and_keeps_versions(tmp_path):
@@ -74,7 +98,8 @@ top_favorites:
       - {{id: "{C('singertopic')}", name: "歌い手A - Topic"}}
     aliases: ["歌い手A"]
     playlist: {{name: "歌い手Aチャンネル"}}
-    other_playlist: {{id: "PLsingerOther", name: "その他歌い手A"}}
+    other:
+      playlist: {{id: "PLsingerOther", name: "その他歌い手A"}}
     specials:
       - playlist: {{name: "作曲者B×歌い手A"}}
         published_by: [{{id: "{C('composer')}", name: "作曲者B"}}]
@@ -82,7 +107,8 @@ favorites:
   - name: "作曲者B"
     channels: [{{id: "{C('composer')}", name: "作曲者B"}}]
     playlist: {{name: "作曲者Bチャンネル"}}
-    other_playlist: {{id: "PLcomposerOther", name: "その他作曲者B"}}
+    other:
+      playlist: {{id: "PLcomposerOther", name: "その他作曲者B"}}
     specials:
       - playlist: {{name: "作曲者Bセルフカバー"}}
         published_by: [{{id: "{C('composer')}", name: "作曲者B"}}]
@@ -115,8 +141,8 @@ def test_specials_and_other(tmp_path):
     assert t["歌い手Aチャンネル"].auto == {"s1"}
     assert t["作曲者B×歌い手A"].auto == {"b1"}             # @ハンドルで確認できた
     assert t["作曲者B×歌い手A"].cand == {"b4"}             # 名前（aliases）だけ → 未仕分けで確認
-    assert t["その他歌い手A"].auto == {"x1"}               # 特別再生リスト分(b1)は除外
-    assert t["その他歌い手A"].cand == {"x2"}
+    assert t["その他歌い手A"].auto == set()                # 「その他○○」は常に判断
+    assert t["その他歌い手A"].cand == {"x1", "x2"}         # 特別再生リスト分(b1, b4)は除外
     assert t["作曲者Bセルフカバー"].auto == {"b3"}
     assert t["作曲者Bチャンネル"].cand == {"b1", "b2", "b3", "b4"} and not t["作曲者Bチャンネル"].auto
     assert t["その他作曲者B"].cand == {"x1"}               # お気に入りの「その他」は判断
@@ -133,12 +159,14 @@ combos: [{{playlist: "x"}}]
 favorites:
   - name: "B"
     channels: [{{id: "{C('b')}"}}]
-    other_playlist: {{name: "その他B"}}
+    other_auto: true
+    other:
+      playlist: {{name: "その他B"}}
 songs:
   - name: 曲名
 """, encoding="utf-8")
     errs = "\n".join(rules.validate(Config(p)))
-    assert "combos" in errs and "id と name" in errs and "other_playlist は id" in errs and "ダブルクオート" in errs
+    assert "combos" in errs and "id と name" in errs and "other_auto は廃止" in errs and "other.playlist: id が必要" in errs and "ダブルクオート" in errs
 
 
 def test_promotion_counts_dedupe(tmp_path):

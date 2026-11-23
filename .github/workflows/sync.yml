@@ -58,6 +58,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data reports
+          git add config.yaml data reports
           git diff --cached --quiet || git commit -m "sync: $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          # 実行中に config.yaml を手で編集・push していた場合に備えて取り込んでから push
+          git pull --rebase --autostash origin main
           git push

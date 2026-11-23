@@ -2,7 +2,8 @@
 # 各フィールドの仕様は docs/config.md を参照してください。
 # ・文字列はすべてダブルクオート（"…"）で囲みます（囲んでいないとエラーで止まります）。
 # ・チャンネル・再生リストは {id, name} の組で書きます。判別には id だけを使い、name は表示・確認用です。
-# ・このファイルはシステムが書き換えることはありません（コメントもそのまま残ります）。
+# ・システムは「新しく作った再生リストの id」と「昇格した曲」をこのファイルに書き込みます。
+#   コメント・クオート・並び順はそのまま残ります（インデント幅だけはファイル全体でそろえ直します）。
 
 playlist_privacy: "private"     # 新しく作る再生リストの公開設定
 
@@ -40,7 +41,8 @@ top_favorites:
       - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "歌い手A"}
       - {id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "歌い手A - Topic"}
     playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
-    other_playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
+    other:
+      playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
     specials:
       # 作曲者Bが公開した、歌い手Aがボーカルの曲（「その他歌い手A」からは除外される）
       - playlist: {name: "作曲者B×歌い手A"}
@@ -54,7 +56,7 @@ favorites:
     playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "作曲者Bチャンネル"}
     specials:
       # 作曲者B本人が歌ったセルフカバー
-      - playlist: {name: "作曲者Bセルフカバー"}
+      - playlist: {name: "作曲者Bセルフカバー"}   # id がなければ初回に作成し、ここに id を書き込む
         published_by:
           - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
         keywords: ["self cover", "セルフカバー"]

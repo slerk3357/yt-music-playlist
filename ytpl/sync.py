@@ -1,8 +1,8 @@
 """毎日の同期処理本体。  python -m ytpl.sync [--dry-run]
 
 このプログラムは再生リストへの「追加」だけを行い、動画の削除は一切しない。
-config.yaml は読むだけで書き換えない。自動で決めたこと（昇格した曲・作成した
-再生リストのID）は data/ 以下のファイルに記録する。
+config.yaml に書き戻すのは「新しく作った再生リストのID」と「昇格した曲」だけで、
+ruamel.yaml の round-trip によりコメント・クオート・並び順は保たれる。
 """
 from __future__ import annotations
 
@@ -75,12 +75,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     now = now or datetime.now(JST)
     today = now.date().isoformat()
     data = Path(data_dir)
-    promoted_path, created_path, state_path = (data / "promoted_songs.yaml", data / "created_playlists.yaml",
-                                               data / "state.yaml")
-    promoted = _plain(load_yaml(promoted_path, []) or [])
-    created = _plain(load_yaml(created_path, {}) or {})
+    state_path = data / "state.yaml"
     state = _plain(load_yaml(state_path, {}) or {})
-    cfg = Config(config_path, extra_songs=promoted)
+    cfg = Config(config_path)
     errors = rules.validate(cfg)
     if errors:
         raise SystemExit("config.yaml の設定エラー:\n" + "\n".join(f"- {e}" for e in errors))
@@ -96,10 +93,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
 
     def resolve(pl: rules.PL) -> str | None:
         """再生リストIDを決める（名前では探さない）。"""
-        if pl.id:
-            return pl.id if pl.id in alive else None
-        rec = created.get(pl.key)
-        return rec["id"] if rec and rec.get("id") in alive else None
+        return pl.id if pl.id and pl.id in alive else None
 
     try:
         # 1. 自分の全再生リストをスナップショット（＝バックアップ）
@@ -160,15 +154,13 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
 
     idx = rules.Index(cfg, catalog.all())
 
-    # 5. 「その他の曲」→「お気に入りの曲」への昇格（data/promoted_songs.yaml に記録）
+    # 5. 「その他の曲」→「お気に入りの曲」への昇格（config.yaml の songs に追加）
     misc_pid = resolve(fixed["misc"])
     if not quota_hit and misc_pid:
         titles = [e.get("title") for e in ledger.present(misc_pid)]
         for c in rules.promotion_candidates(cfg, titles, idx, roles):
-            entry = {"name": c["name"], "aliases": c["aliases"], "playlist": {"name": c["name"]},
-                     "promoted_at": today, "promoted_versions": c["versions"]}
-            promoted.append(entry)
-            cfg.extra_songs.append(entry)
+            cfg.append_song({"name": c["name"], "playlist": {"name": c["name"]}, "aliases": c["aliases"],
+                             "promoted_at": today, "promoted_versions": c["versions"]})
             rep.add("お気に入りの曲に昇格", f"{c['name']}（{c['versions']} 曲）")
 
     # 6. 振り分け先を計算
@@ -225,14 +217,12 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                         pid = f"DRYRUN:{pl.key}"
                     else:
                         pid = yt.create_playlist(pl.name, cfg.section("playlist_privacy"))
-                        created[pl.key] = {"id": pid, "name": pl.name, "created_at": today}
-                        for s in promoted:
-                            if pl.key == f"song:{s['name']}":
-                                s["playlist"] = {"id": pid, "name": pl.name}
+                        cfg.set_playlist_id(pl.path, pid, pl.name)
+                        pl.id = pid
                     alive[pid] = pl.name
                     pids[pl.key] = pid
                     ledger.doc(pid, pl.name)
-                    rep.add("新しく作った再生リスト（config.yaml に id を書いてください）", f"{pl.name}: {pid}")
+                    rep.add("新しく作った再生リスト（config.yaml に id を追記）", f"{pl.name}: {pid}")
                 if dry_run:
                     rep.add("追加（予定）", f"{pl.name} ← {_label(catalog.get(vid), vid)}")
                     continue
@@ -272,7 +262,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             for g in rules.duplicate_groups(present, idx, lambda c: ents.get(c) or c):
                 rep.add("重複の可能性（手動で確認）", f"{tg.pl.name}: " + " / ".join(_label(catalog.get(v), v) for v in g))
 
-    # 9. 保存とレポート（config.yaml は書き換えない）
+    # 9. 保存とレポート
     state["last_run"] = now.isoformat(timespec="seconds")
     header = (f"# 同期レポート {now:%Y-%m-%d %H:%M} JST{'（ドライラン）' if dry_run else ''}\n\n"
               f"- APIクォータ使用量（推定）: {yt.used} / {cfg.budget}\n"
@@ -282,8 +272,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     if not dry_run:
         catalog.save()
         ledger.save()
-        dump_yaml(promoted_path, promoted)
-        dump_yaml(created_path, created)
+        cfg.save()
         dump_yaml(state_path, state)
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(text, encoding="utf-8")

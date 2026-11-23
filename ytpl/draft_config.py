@@ -99,7 +99,7 @@ def main():
         if e["own"]:
             out.append(f"    playlist: {ref(pid[e['own']], e['own'])}")
         if f"その他{name}" in pid:
-            out.append(f"    other_playlist: {ref(pid['その他' + name], 'その他' + name)}")
+            out += ["    other:", f"      playlist: {ref(pid['その他' + name], 'その他' + name)}"]
         if e["specials"]:
             out.append("    specials:  # 要確認：置き場所（どの人の項目か）と条件を見直す")
             for t, cids in e["specials"]:

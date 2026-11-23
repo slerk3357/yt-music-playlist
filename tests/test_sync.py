@@ -5,7 +5,7 @@ import pytest
 
 from ytpl import rules
 from ytpl.api import COST, QuotaExceeded, YouTube, uploads_playlist_id
-from ytpl.store import load_yaml
+from ytpl.store import Config, load_yaml
 from ytpl.sync import run
 
 JST = timezone(timedelta(hours=9))
@@ -82,6 +82,7 @@ def V(id, title, ch, day, cat="10", dur=240, desc="", ch_title=None):
 
 
 CONFIG = f"""
+# 先頭のコメント
 music:
   include_keywords: ["歌ってみた", "cover"]
   exclude_keywords: ["切り抜き", "歌枠"]
@@ -97,7 +98,8 @@ top_favorites:
       - {{id: "{AT}", name: "アリス - Topic"}}
     aliases: ["Alice"]
     playlist: {{id: "PLalice", name: "アリスチャンネル"}}
-    other_playlist: {{id: "PLaliceOther", name: "その他アリス"}}
+    other:
+      playlist: {{id: "PLaliceOther", name: "その他アリス"}}  # 行末のコメント
 favorites:
   - name: "ボブ"
     channels: [{{id: "{B}", name: "ボブ"}}]
@@ -110,6 +112,7 @@ occasional:
         mentions: [{{id: "{D}", name: "デイブ"}}]
   - name: "デイブ"
     channels: [{{id: "{D}", name: "デイブ"}}]
+# 曲のコメント
 songs:
   - name: "星の歌"
     aliases: ["星の歌", "Hoshi no Uta"]
@@ -160,20 +163,23 @@ def day(m, d):
 
 def test_first_run_and_incremental(tmp_path):
     yt = setup(tmp_path)
-    before = (tmp_path / "config.yaml").read_bytes()
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     t = titles(yt)
     assert t["アリスチャンネル"] == ["a1", "a2"]      # TOPIC音源 a1t はMV a1 と重複、配信・インストは除外
     assert set(t["星の歌"]) == {"o1", "a2", "c1"}      # 公式＋カバー（新規作成）
-    assert t["その他アリス"] == ["c5"]                  # @ハンドルで確認できたものだけ自動
+    assert t["その他アリス"] == []                      # 「その他○○」は自動では追加しない
     assert t["キャロルとデイブ"] == ["c2"]
     assert t["未仕分け"] == []                          # 初回取込は未仕分けにしない
     assert set(t["夜の曲"]) == {"b1", "c2", "d1"}      # 昇格（min_versions: 3）
-    assert (tmp_path / "config.yaml").read_bytes() == before   # config.yaml は書き換えない
-    promoted = load_yaml(tmp_path / "data/promoted_songs.yaml")
-    assert promoted[0]["name"] == "夜の曲" and promoted[0]["playlist"]["id"].startswith("PLnew")
-    created = load_yaml(tmp_path / "data/created_playlists.yaml")
-    assert {v["name"] for v in created.values()} == {"星の歌", "キャロルとデイブ", "夜の曲"}
+    # config.yaml に作成した再生リストのIDと昇格した曲が書き戻され、コメントとクオートは保たれる
+    text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    for c in ("# 先頭のコメント", "# 行末のコメント", "# 曲のコメント"):
+        assert c in text
+    cfg = Config(tmp_path / "config.yaml")
+    assert rules.validate(cfg) == []
+    assert cfg.raw["songs"][0]["playlist"]["id"].startswith("PLnew")       # 星の歌
+    assert cfg.raw["songs"][1]["name"] == "夜の曲" and cfg.raw["songs"][1]["playlist"]["id"].startswith("PLnew")
+    assert cfg.raw["occasional"][0]["specials"][0]["playlist"]["id"].startswith("PLnew")
 
     # 新着
     yt.v["b2"] = V("b2", "ボブ 新曲 MV", B, "02-01")
@@ -181,11 +187,14 @@ def test_first_run_and_incremental(tmp_path):
     yt.v["d4"] = V("d4", "星の歌 歌ってみた / デイブ", D, "02-03", cat="24")
     yt.v["a5"] = V("a5", "『新曲』アリス MV", A, "02-04")
     yt.v["c6"] = V("c6", "風の曲 / キャロル", CA, "02-05", desc="feat. Alice")
+    yt.v["c7"] = V("c7", "雨の曲 / キャロル", CA, "02-06", desc="feat. @alice_official")
+    yt.v["d5"] = V("d5", "知らない曲 (Off Vocal) / デイブ", D, "02-07")
     run(yt=yt, now=day(2, 10), **kw(tmp_path))
     t = titles(yt)
-    # b2: お気に入りの○○チャンネル候補 / d3: どこにも入らない / c6: 名前（aliases）だけで一致 → 確認のため
-    assert t["未仕分け"] == ["b2", "d3", "c6"]
-    assert "c6" not in t["その他アリス"]
+    # b2: お気に入りの○○チャンネル候補 / d3: どこにも入らない / c6: 名前だけで一致 / c7: その他アリス候補
+    # d5: オフボーカルは含める設定の再生リストがないので入れない
+    assert t["未仕分け"] == ["b2", "d3", "c6", "c7"]
+    assert t["その他アリス"] == []
     assert "d4" in t["星の歌"] and "a5" in t["アリスチャンネル"]
     assert len(set(t["星の歌"])) == len(t["星の歌"])     # 2回目以降も二重追加しない
 
@@ -194,7 +203,7 @@ def test_first_run_and_incremental(tmp_path):
     yt.pl["PLalice"]["items"].remove("a2")
     run(yt=yt, now=day(2, 11), **kw(tmp_path))
     t = titles(yt)
-    assert t["未仕分け"] == ["b2", "d3", "c6"]
+    assert t["未仕分け"] == ["b2", "d3", "c6", "c7"]
     assert "a2" not in t["アリスチャンネル"]            # 手で消した曲は戻さない
     led = load_yaml(tmp_path / "data/playlists/アリスチャンネル.yaml")
     assert {e["video_id"]: e["status"] for e in led["items"]}["a2"] == "missing"
@@ -244,10 +253,18 @@ def test_playlist_matched_by_id_not_name(tmp_path):
 
 
 def test_other_requires_id(tmp_path):
-    cfg = CONFIG.replace('    other_playlist: {id: "PLaliceOther", name: "その他アリス"}\n', "")
-    yt = setup(tmp_path, cfg)
-    run(yt=yt, now=day(1, 10), **kw(tmp_path))
-    assert titles(yt)["その他アリス"] == []     # other_playlist がなければ扱わない
+    yt = setup(tmp_path, CONFIG.replace('playlist: {id: "PLaliceOther", name: "その他アリス"}',
+                                        'playlist: {name: "その他アリス"}'))
+    with pytest.raises(SystemExit) as e:
+        run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    assert "other.playlist" in str(e.value)
+
+
+def test_dry_run_does_not_touch_config(tmp_path):
+    yt = setup(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    run(yt=yt, now=day(1, 10), dry_run=True, **kw(tmp_path))
+    assert (tmp_path / "config.yaml").read_bytes() == before
 
 
 def test_unquoted_string_rejected(tmp_path):

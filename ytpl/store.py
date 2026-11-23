@@ -31,7 +31,7 @@ def dump_yaml(path: Path, data) -> None:
 
 
 # --------------------------------------------------------------------------
-# 設定（config.yaml はユーザーが書くファイル。システムは読むだけで、書き換えない）
+# 設定（システムが書き込むのは、作成した再生リストのIDと昇格した曲だけ）
 # --------------------------------------------------------------------------
 DEFAULTS = {
     "playlist_privacy": "private",
@@ -76,16 +76,59 @@ def unquoted_strings(node, path="") -> list[str]:
     return out
 
 
+def dq(value):
+    """システムが書き込む値。文字列はダブルクオート付きにする。"""
+    from ruamel.yaml.comments import CommentedMap, CommentedSeq
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+
+    if isinstance(value, str):
+        return DoubleQuotedScalarString(value)
+    if isinstance(value, dict):
+        m = CommentedMap((k, dq(v)) for k, v in value.items())
+        return m
+    if isinstance(value, list):
+        sq = CommentedSeq(dq(v) for v in value)
+        sq.fa.set_flow_style()
+        return sq
+    return value
+
+
 class Config:
-    def __init__(self, path: str | Path, extra_songs: list | None = None):
+    """config.yaml。システムが書き換えるのは「作成した再生リストのID」と「昇格した曲」だけ。
+
+    ruamel.yaml の round-trip で読み書きするので、コメント・クオート・並び順は保たれる。
+    インデント幅はファイルから推定し、ファイル全体をその幅にそろえて書き出す。
+    """
+
+    def __init__(self, path: str | Path):
+        from ruamel.yaml.util import load_yaml_guess_indent
+
         self.path = Path(path)
-        y = _yaml()
-        y.preserve_quotes = True
+        self.dirty = False
         text = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
-        loaded = y.load(text) if text.strip() else None
-        self.quote_errors = unquoted_strings(loaded or {})
-        self.raw = _plain_tree(loaded or {})
-        self.extra_songs = list(extra_songs or [])
+        self._indent = (2, 2)
+        if text.strip():
+            try:
+                _, ind, bsi = load_yaml_guess_indent(text)
+                self._indent = (ind or 2, bsi if bsi is not None else 2)
+            except Exception:
+                pass
+        y = self._yaml()
+        self.doc = y.load(text) if text.strip() else None
+        if self.doc is None:
+            from ruamel.yaml.comments import CommentedMap
+            self.doc = CommentedMap()
+        self.quote_errors = unquoted_strings(self.doc)
+        self.raw = _plain_tree(self.doc)
+
+    def _yaml(self) -> YAML:
+        y = YAML()
+        y.preserve_quotes = True
+        y.width = 4096
+        y.allow_unicode = True
+        ind, bsi = self._indent
+        y.indent(mapping=2, sequence=max(ind, bsi + 2), offset=bsi)
+        return y
 
     def section(self, name: str) -> dict:
         base = DEFAULTS.get(name)
@@ -100,13 +143,64 @@ class Config:
         return list(self.raw.get(name) or [])
 
     def songs(self) -> list:
-        """config.yaml の songs ＋ 自動昇格した曲（data/promoted_songs.yaml）。"""
-        ignored = {str(x) for x in self.section("promotion")["ignore"] or []}
-        return self.list("songs") + [s for s in self.extra_songs if s.get("name") not in ignored]
+        return self.list("songs")
 
     @property
     def budget(self) -> int:
         return int(self.section("quota")["daily_budget"])
+
+    # ---- システムによる書き込み -------------------------------------------
+    def _node(self, path: tuple, create=False):
+        from ruamel.yaml.comments import CommentedMap
+
+        node = self.doc
+        for i, key in enumerate(path):
+            nxt = node[key] if (isinstance(key, int) or key in node) else None
+            if nxt is None:
+                if not create:
+                    return None
+                nxt = CommentedMap()
+                if i == len(path) - 1:
+                    nxt.fa.set_flow_style()
+                node[key] = nxt
+            node = nxt
+        return node
+
+    def set_playlist_id(self, path: tuple, pid: str, name: str) -> None:
+        """path の再生リスト指定 {name} に id を書き込む（なければ {id, name} を作る）。"""
+        node = self._node(path, create=True)
+        if "name" not in node:
+            node["name"] = dq(name)
+        if "id" in node:
+            node["id"] = dq(pid)
+        else:
+            node.insert(0, "id", dq(pid))
+        self.raw = _plain_tree(self.doc)
+        self.dirty = True
+
+    def append_song(self, entry: dict) -> int:
+        """昇格した曲を songs の末尾に追加し、その位置を返す。"""
+        from ruamel.yaml.comments import CommentedSeq
+
+        if self.doc.get("songs") is None:
+            self.doc["songs"] = CommentedSeq()
+        m = dq({k: v for k, v in entry.items() if k != "playlist"})
+        if entry.get("playlist"):
+            pl = dq(entry["playlist"])
+            pl.fa.set_flow_style()
+            m.insert(1, "playlist", pl)
+        self.doc["songs"].append(m)
+        self.raw = _plain_tree(self.doc)
+        self.dirty = True
+        return len(self.doc["songs"]) - 1
+
+    def save(self) -> None:
+        if not self.dirty:
+            return
+        buf = io.StringIO()
+        self._yaml().dump(self.doc, buf)
+        self.path.write_text(buf.getvalue(), encoding="utf-8")
+        self.dirty = False
 
 
 # --------------------------------------------------------------------------
