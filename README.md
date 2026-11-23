@@ -96,7 +96,7 @@ python -m ytpl.draft_config > config.draft.yaml
 
 できあがったら、整合性を確認してからコミットします。
 ```bash
-python -m ytpl.check                  # エラーがあれば内容を表示
+python -m ytpl.check --fix            # 整形（クオート・インデント・チャンネル項目を name 順に）してから確認
 git config core.hooksPath .githooks   # 以後、config.yaml をコミットするたびに自動で確認
 ```
 
@@ -160,6 +160,6 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt pytest
 pytest -q                     # 偽APIを使ったテスト
-python -m ytpl.check          # config.yaml の整合性チェック
+python -m ytpl.check          # config.yaml の整合性チェック（--fix で整形も）
 python -m ytpl.sync --dry-run # 手元で試す（環境変数が必要）
 ```

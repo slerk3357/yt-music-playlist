@@ -1,9 +1,10 @@
 """config.yaml の整合性チェック（APIは使わない）。
 
     python -m ytpl.check [config.yaml] [--label 表示名]
+    python -m ytpl.check --fix [config.yaml]    # 整形（ytpl/fmt.py）してからチェック
 
 エラーがあれば終了コード 1。警告だけなら 0。コミット前フック（.githooks/pre-commit）と
-GitHub Actions（check-config）から使う。
+GitHub Actions（check-config）から使う。整形されていないファイルは警告になる。
 """
 from __future__ import annotations
 
@@ -57,7 +58,9 @@ def warnings(cfg: Config) -> list[str]:
     return out
 
 
-def check(path: str | Path, label: str | None = None) -> int:
+def check(path: str | Path, label: str | None = None, fix: bool = False) -> int:
+    from . import fmt
+
     path = Path(path)
     name = label or str(path)
     if not path.exists():
@@ -68,8 +71,17 @@ def check(path: str | Path, label: str | None = None) -> int:
     except Exception as e:  # YAML の文法エラー
         print(f"✗ {name} を読み込めません:\n{e}")
         return 1
+    if fix:
+        if fmt.format_file(path):
+            print(f"✎ {name} を整形しました（クオート・インデント・チャンネル項目の並び順）")
+        else:
+            print(f"✎ {name} は整形済みです")
+        cfg = Config(path)
     errs = rules.validate(cfg)
     warns = warnings(cfg) if not errs else []
+    if not fix and not fmt.is_formatted(path):
+        warns.append("整形されていません（python -m ytpl.check --fix で、クオート・インデント・"
+                     "チャンネル項目の並び順を整えられます）")
     for w in warns:
         print(f"⚠ {w}")
     for e in errs:
@@ -90,8 +102,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="config.yaml の整合性チェック")
     ap.add_argument("path", nargs="?", default="config.yaml")
     ap.add_argument("--label", help="表示に使う名前")
+    ap.add_argument("--fix", action="store_true", help="整形してからチェックする（ファイルを書き換える）")
     a = ap.parse_args(argv)
-    sys.exit(check(a.path, a.label))
+    sys.exit(check(a.path, a.label, a.fix))
 
 
 if __name__ == "__main__":

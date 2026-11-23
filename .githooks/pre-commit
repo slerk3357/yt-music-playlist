@@ -1,5 +1,6 @@
 #!/bin/sh
-# config.yaml の整合性をコミット前に確認する。
+# config.yaml の整合性をコミット前に確認する（整形されていない場合は警告のみ）。
+#   整形する: python -m ytpl.check --fix
 #   有効にする: git config core.hooksPath .githooks
 #   一時的に飛ばす: git commit --no-verify
 git diff --cached --name-only --diff-filter=ACM | grep -qx 'config.yaml' || exit 0

@@ -277,7 +277,8 @@ def test_name_reference_errors(tmp_path):
 def test_check_script(tmp_path, capsys):
     from ytpl import check
     good = tmp_path / "good.yaml"
-    good.write_text(NAMES, encoding="utf-8")
+    from ytpl import fmt
+    good.write_text(fmt.format_text(NAMES), encoding="utf-8")
     assert check.check(good) == 0
     assert "警告 0 件" in capsys.readouterr().out
     bad = tmp_path / "bad.yaml"
