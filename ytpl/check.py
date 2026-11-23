@@ -54,9 +54,6 @@ def warnings(cfg: Config) -> list[str]:
                     sp.get(k) for k in ("published_by", "mentions", "mention_aliases", "keywords")):
                 out.append(f"{key}「{e.get('name')}」.specials[{j}]: require_related: false で条件がないため、"
                            "監視中の全動画が対象になります")
-            if sp.get("published_by") and sp.get("mentions") and not sp.get("mention_aliases") and e.get("aliases"):
-                out.append(f"{key}「{e.get('name')}」.specials[{j}]: mention_aliases がないため、"
-                           f"この項目の aliases {list(e['aliases'])} でも一致します")
     return out
 
 

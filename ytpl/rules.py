@@ -513,30 +513,34 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             m_ids = chan_ids(cfg, sp.get("mentions"))
             m_alias = sp.get("mention_aliases")
 
-            def mentioned(h, m_ids=m_ids, m_alias=m_alias):
-                return (h & idx.mentioning(ref_tokens(m_ids, handles))) | idx.alias_hits(m_alias, among=h)
+            def split(pool, refs_ids, aliases, base_verified=frozenset()):
+                """(チャンネルで確認できた動画, 名前だけで一致した動画) に分ける。"""
+                ver = (pool & set(base_verified)) | (pool & idx.mentioning(ref_tokens(refs_ids, handles)))
+                return ver, idx.alias_hits(aliases, among=pool) - ver
 
             if not sp.get("require_related", True):
                 # 関係の確認なし：published_by（なければ全動画）を対象に、書いた条件だけで判定
                 h = idx.channels(pub) if pub else set(idx.r)
-                if m_ids or m_alias:
-                    h = mentioned(h)
-                pools = (h, set())
+                pools = split(h, m_ids, m_alias) if (m_ids or m_alias) else (h, set())
             elif pub:
-                # published_by あり：指定チャンネルの動画だけが対象。関係は mentions（既定：この人）と
-                # mention_aliases（既定：この人の aliases）で確認する。範囲が絞られているので名前一致も信用する
+                # published_by あり：指定チャンネルの動画だけが対象。
+                # 関係は mentions（既定：この人の channels）と mention_aliases（既定：この人の aliases）で確認する。
+                # この人のチャンネルの動画は確認不要
                 h = idx.channels(pub)
                 alias = m_alias if m_alias else e.get("aliases")
                 if m_ids:
-                    h = mentioned(h, m_ids, alias)
+                    pools = split(h, m_ids, alias)
                 else:
-                    h = (h & own) | mentioned(h, own_ids, alias)
-                pools = (h, set())
+                    pools = split(h, own_ids, alias, base_verified=own)
             else:
-                # published_by なし：この人の曲（本人名義＋関係曲）が対象
-                pools = []
-                for pool in (own | verified, by_name):
-                    pools.append(mentioned(pool) if (m_ids or m_alias) else pool)
+                # published_by なし：この人の曲（本人名義＋関係曲）が対象。名前だけの関係曲は確認待ち
+                pool_v, pool_n = own | verified, by_name
+                if m_ids or m_alias:
+                    v1, n1 = split(pool_v, m_ids, m_alias)
+                    v2, n2 = split(pool_n, m_ids, m_alias)
+                    pools = (v1, n1 | v2 | n2)
+                else:
+                    pools = (pool_v, pool_n)
             hits = []
             for h in pools:
                 if sp.get("keywords"):

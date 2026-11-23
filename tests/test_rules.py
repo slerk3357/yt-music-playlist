@@ -153,15 +153,16 @@ def test_specials_and_other(tmp_path):
           V("d3", "Dの曲3", ch=D, desc="solo")]
     t, idx = targets(cfg, vs, h)
     assert t["歌い手Aチャンネル"].auto == {"s1"}
-    # published_by あり：作曲者Bの動画だけが対象。@ハンドル(b1)に加え、歌い手Aの aliases(b4)も信用して自動
-    assert t["作曲者B×歌い手A"].auto == {"b1", "b4"}
-    assert t["作曲者B×歌い手A"].cand == set()
+    # published_by あり：作曲者Bの動画だけが対象。@ハンドル(b1)は自動、歌い手Aの aliases だけの一致(b4)は未仕分け
+    assert t["作曲者B×歌い手A"].auto == {"b1"}
+    assert t["作曲者B×歌い手A"].cand == {"b4"}
     assert t["その他歌い手A"].auto == set()                # 「その他○○」は常に判断
     assert t["その他歌い手A"].cand == {"x1", "x2"}         # 特別再生リスト分(b1, b4)は除外
     assert t["作曲者Bセルフカバー"].auto == {"b3"}
     assert t["作曲者Bチャンネル"].cand == {"b1", "b2", "b3", "b4"} and not t["作曲者Bチャンネル"].auto
     assert t["その他作曲者B"].cand == {"x1"}               # お気に入りの「その他」は判断
-    assert t["歌い手D×歌い手E"].auto == {"d1", "d2"}       # mention_aliases は信用して自動
+    assert t["歌い手D×歌い手E"].auto == {"d1"}             # @ハンドルで確認できたものは自動
+    assert t["歌い手D×歌い手E"].cand == {"d2"}             # mention_aliases（名前）だけの一致は未仕分け
     roles = rules.channel_roles(cfg)
     assert rules.needs_unsorted("d3", roles, idx, 0, 0)         # たまに聴く・どこにも入らない
     assert not rules.needs_unsorted("s1", roles, idx, 1, 0)
@@ -252,10 +253,12 @@ def test_name_references_and_published_by_scope(tmp_path):
           V("b3", "Bの曲3 MV", ch=B, desc="Vocal: @singer_e"),
           V("x1", "曲X", ch=B)]
     t, _ = targets(cfg, vs, h)
-    assert t["B×A"].auto == {"b1", "bt1"}            # 歌い手A本人の曲(s1)は対象外。TOPICも名前指定で含まれる
-    # mentions を書いた場合はその相手で確認（mention_aliases がないので歌い手Aの aliases も使う）
-    assert t["B×A（Eも参加）"].auto == {"b3", "bt1"}
-    assert t["AとBの曲"].auto == {"s1", "b1", "bt1"}    # 本人の曲は関係の確認なしで対象
+    # 歌い手A本人の曲(s1)は対象外。作曲者BのTOPIC(bt1)も対象範囲だが、名前だけの一致なので未仕分け
+    assert t["B×A"].auto == {"b1"} and t["B×A"].cand == {"bt1"}
+    # mentions を書いた場合はその相手で確認（mention_aliases がないので歌い手Aの aliases も名前として使う）
+    assert t["B×A（Eも参加）"].auto == {"b3"} and t["B×A（Eも参加）"].cand == {"bt1"}
+    assert t["AとBの曲"].auto == {"s1", "b1"}           # 本人の曲は関係の確認なしで自動
+    assert t["AとBの曲"].cand == {"bt1"}
     assert t["曲X"].auto == {"x1"}                     # official_channels も名前で指定できる
     roles = rules.channel_roles(cfg)
     assert roles[BT]["role"] == "favorite"
@@ -276,7 +279,7 @@ def test_check_script(tmp_path, capsys):
     good = tmp_path / "good.yaml"
     good.write_text(NAMES, encoding="utf-8")
     assert check.check(good) == 0
-    assert "mention_aliases がないため" in capsys.readouterr().out   # B×A（Eも参加）への警告
+    assert "警告 0 件" in capsys.readouterr().out
     bad = tmp_path / "bad.yaml"
     bad.write_text('favorites:\n  - name: B\n    channels: []\n', encoding="utf-8")
     assert check.check(bad) == 1
