@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 
 def _yaml() -> YAML:
@@ -32,13 +31,12 @@ def dump_yaml(path: Path, data) -> None:
 
 
 # --------------------------------------------------------------------------
-# 設定
+# 設定（config.yaml はユーザーが書くファイル。システムは読むだけで、書き換えない）
 # --------------------------------------------------------------------------
 DEFAULTS = {
     "playlist_privacy": "private",
     "quota": {"daily_budget": 9000},
-    "titles": {"own": "{name}チャンネル", "other": "その他{name}",
-               "unsorted": "未仕分け", "misc": "その他の曲"},
+    "playlists": {"unsorted": {"name": "未仕分け"}, "misc": {"name": "その他の曲"}},
     "music": {
         "categories": ["10"],
         "include_keywords": [],
@@ -49,14 +47,45 @@ DEFAULTS = {
     "matching": {"use_description": True},
     "dedupe": {"enabled": True},
     "promotion": {"enabled": True, "min_versions": 5, "ignore": []},
-    "unsorted": {"auto_remove_when_sorted": True},
 }
 
 
+def _plain_tree(obj):
+    if isinstance(obj, dict):
+        return {str(k): _plain_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_plain_tree(v) for v in obj]
+    if isinstance(obj, str):
+        return str(obj)
+    return obj
+
+
+def unquoted_strings(node, path="") -> list[str]:
+    """ダブルクオートで囲まれていない文字列値の場所を返す。"""
+    from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+
+    out = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out += unquoted_strings(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out += unquoted_strings(v, f"{path}[{i}]")
+    elif isinstance(node, str) and not isinstance(node, DoubleQuotedScalarString):
+        out.append(f"{path}: {node}")
+    return out
+
+
 class Config:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, extra_songs: list | None = None):
         self.path = Path(path)
-        self.raw = load_yaml(self.path, CommentedMap())
+        y = _yaml()
+        y.preserve_quotes = True
+        text = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+        loaded = y.load(text) if text.strip() else None
+        self.quote_errors = unquoted_strings(loaded or {})
+        self.raw = _plain_tree(loaded or {})
+        self.extra_songs = list(extra_songs or [])
 
     def section(self, name: str) -> dict:
         base = DEFAULTS.get(name)
@@ -70,20 +99,14 @@ class Config:
     def list(self, name: str) -> list:
         return list(self.raw.get(name) or [])
 
+    def songs(self) -> list:
+        """config.yaml の songs ＋ 自動昇格した曲（data/promoted_songs.yaml）。"""
+        ignored = {str(x) for x in self.section("promotion")["ignore"] or []}
+        return self.list("songs") + [s for s in self.extra_songs if s.get("name") not in ignored]
+
     @property
     def budget(self) -> int:
         return int(self.section("quota")["daily_budget"])
-
-    def title(self, kind: str, name: str = "") -> str:
-        return self.section("titles")[kind].format(name=name)
-
-    def append_song(self, entry: dict) -> None:
-        if self.raw.get("songs") is None:
-            self.raw["songs"] = CommentedSeq()
-        self.raw["songs"].append(CommentedMap(entry))
-
-    def save(self) -> None:
-        dump_yaml(self.path, self.raw)
 
 
 # --------------------------------------------------------------------------

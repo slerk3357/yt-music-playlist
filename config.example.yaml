@@ -1,110 +1,79 @@
-# ===== yt-playlist-sync 設定 =====
-# チャンネルIDは「UC」で始まる24文字。チャンネルページ →「概要」→「チャンネルを共有」→「チャンネルIDをコピー」で取得できます。
+# ===== yt-music-playlist 設定の例 =====
+# 各フィールドの仕様は docs/config.md を参照してください。
+# ・文字列はすべてダブルクオート（"…"）で囲みます（囲んでいないとエラーで止まります）。
+# ・チャンネル・再生リストは {id, name} の組で書きます。判別には id だけを使い、name は表示・確認用です。
+# ・このファイルはシステムが書き換えることはありません（コメントもそのまま残ります）。
 
-playlist_privacy: private      # 自動で作る再生リストの公開設定 (private / unlisted / public)
+playlist_privacy: "private"     # 新しく作る再生リストの公開設定
 
 quota:
-  daily_budget: 9000           # 1日1万ユニットのうち、このプログラムが使う上限
+  daily_budget: 9000
 
-# 再生リストは playlist_id があればIDで、なければ名前（下のフォーマット）で探します。
-# IDで指定しておくと、YouTube上で名前を変えても同じ再生リストを使い続けます。
-playlist_ids:
-  unsorted: PLxxxxxxxxxxxxxxxx   # 「未仕分け」（任意）
-  misc: PLxxxxxxxxxxxxxxxx       # 「その他の曲」（任意）
+playlists:
+  unsorted: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "未仕分け"}
+  misc: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他の曲"}
 
-titles:                        # 再生リスト名のフォーマット
-  own: "{name}チャンネル"
-  other: "その他{name}"
-  unsorted: 未仕分け
-  misc: その他の曲
-
-music:                         # 「曲」とみなす動画の判定（Instrumental・Off Vocal・カラオケは常に除外）
-  categories: ["10"]           # YouTubeの音楽カテゴリ
-  include_keywords: [歌ってみた, うたってみた, cover, カバー, MV, "Music Video", オリジナル曲, "Original Song", 弾き語り, "feat.", "self cover", セルフカバー]
-  exclude_keywords: ["#shorts", 切り抜き, 歌枠, 配信, 雑談, 告知, 予告, teaser, trailer, クロスフェード, XFD, "short ver", ショート]
-  min_seconds: 61              # これ未満はショートとして除外
-  max_seconds: 900             # これ超は配信アーカイブ・メドレー等として除外
+music:
+  categories: ["10"]
+  include_keywords: ["歌ってみた", "うたってみた", "cover", "カバー", "MV", "Music Video", "オリジナル曲", "Original Song", "弾き語り", "feat."]
+  exclude_keywords: ["#shorts", "切り抜き", "歌枠", "配信", "雑談", "告知", "予告", "teaser", "trailer", "クロスフェード", "XFD", "short ver", "ショート"]
+  min_seconds: 61
+  max_seconds: 900
 
 matching:
-  use_description: true        # 「その他○○」やコラボ判定で概要欄も見る
+  use_description: true
 
-dedupe:                        # 同じ人の同じ曲・同じバージョンは1本だけ入れる（MV優先、TOPIC音源は後回し）
-  enabled: true                # Remix・Acoustic Ver. 等の別バージョンは別の曲として扱う
-
-promotion:                     # 「その他の曲」→「お気に入りの曲」昇格
+dedupe:
   enabled: true
-  min_versions: 5              # 本家/カバーが監視チャンネル内でこの数以上あれば昇格
-  ignore: []                   # 昇格させたくない曲名
 
-unsorted:
-  auto_remove_when_sorted: true  # 他の再生リストに仕分けられたら「未仕分け」から外す
+promotion:
+  enabled: true
+  min_versions: 5
+  ignore: []
 
-ignore_video_ids: []           # どの再生リストにも自動で入れない動画ID
+ignore_video_ids: []
 
 # ===== チャンネル =====
-# 3分類とも書式は同じです。チャンネルはすべてチャンネルID（UC…）で指定し、名前では探しません。
-#   ○○チャンネル … channel_ids のチャンネル（本人・サブ・TOPIC）が公開した曲
-#   その他○○     … 他チャンネルの曲のうち、概要欄・タイトルに @ハンドル/チャンネルURL があるもの
-#                   （特別再生リストに入った曲は除く）
-#   specials      … 別の条件を合わせた特別再生リスト（下の例）
-#
-# 「自動」の再生リストは毎日自動で追加されます。「判断」の再生リストは、新しい候補を
-# 「未仕分け」に仮保存するので、そこから手で振り分けてください。
-#
-#                    ○○チャンネル        その他○○             specials
-#   top_favorites    自動（全曲）         自動（既定で作成）    自動
-#   favorites        判断                 判断（other: true）   自動
-#   occasional       なし（own: true で判断）判断（other: true）自動
-#
-# 共通の任意項目:
-#   aliases: [名前]          名前でも「その他○○」を探す（同名の別人が混ざる可能性あり）
-#   playlist_id / other_playlist_id    再生リストをIDで固定
-#   auto / other_auto        自動・判断の切り替え（true で自動）
-#   include_video_ids / exclude_video_ids / other_include_video_ids / other_exclude_video_ids
-#   other_exclude_keywords   「その他○○」から除外する語
-
 top_favorites:
-  - name: 藍月なくる
-    channel_ids:
-      - UCxxxxxxxxxxxxxxxxxxxxxx   # 本人
-      - UCyyyyyyyyyyyyyyyyyyyyyy   # 藍月なくる - Topic
-    playlist_id: PLxxxxxxxxxxxxxxxx
-    other_playlist_id: PLxxxxxxxxxxxxxxxx
+  - name: "歌い手A"
+    channels:
+      - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "歌い手A"}
+      - {id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "歌い手A - Topic"}
+    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
+    other_playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
     specials:
-      # Imy が公開した、なくるがボーカルの曲（「その他藍月なくる」からは除外）
-      - playlist: Imyなくちゃ
-        published_by: [UCimyxxxxxxxxxxxxxxxxxx]
-      # セルフカバー
-      - playlist: なくるセルフカバー
-        keywords: [self cover, セルフカバー]
-    # search: true            # 監視していないチャンネルも毎日検索（100ユニット/日）
+      # 作曲者Bが公開した、歌い手Aがボーカルの曲（「その他歌い手A」からは除外される）
+      - playlist: {name: "作曲者B×歌い手A"}
+        published_by:
+          - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
 
 favorites:
-  - name: お気に入りの人
-    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
-    # other: true             # 「その他○○」も作る（候補は未仕分けへ）
+  - name: "作曲者B"
+    channels:
+      - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
+    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "作曲者Bチャンネル"}
+    specials:
+      # 作曲者B本人が歌ったセルフカバー
+      - playlist: {name: "作曲者Bセルフカバー"}
+        published_by:
+          - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
+        keywords: ["self cover", "セルフカバー"]
 
 occasional:
-  - name: たまに聴く人
-    channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx, UCyyyyyyyyyyyyyyyyyyyyyy]
+  - name: "歌い手D"
+    channels:
+      - {id: "UCdddddddddddddddddddddd", name: "歌い手D"}
     specials:
-      # この人の曲のうち、△△（チャンネルID）が概要欄に書かれているもの
-      - playlist: ○○△△
-        mentions: [UCzzzzzzzzzzzzzzzzzzzzzz]
+      # 歌い手Dの曲のうち、歌い手Eが関わっているもの
+      - playlist: {name: "歌い手D×歌い手E"}
+        mentions:
+          - {id: "UCeeeeeeeeeeeeeeeeeeeeee", name: "歌い手E"}
+        mention_aliases: ["歌い手E"]
 
-# specials の条件（すべて任意・書いたものは全部満たす必要あり）:
-#   published_by: [UC…]      公開したチャンネル（省略時はこの人の曲＋関係曲すべて）
-#   mentions: [UC…]          概要欄・タイトルに @ハンドル/URL が書かれている相手
-#   mention_aliases: [名前]  相手を名前でも探す
-#   keywords: [語]           タイトルに含まれる語（どれか1つ）
-#   exclude_keywords: [語]
-#   require_related: false   「この人の曲」に限らず条件だけで判定する
-#   auto: false              自動ではなく「未仕分け」経由にする
-
-# ===== お気に入りの曲：公式＋上の3分類のチャンネルによるカバー → 曲名の再生リスト（自動）
+# ===== お気に入りの曲 =====
 songs:
-  - title: 曲名
-    playlist_id: PLxxxxxxxxxxxxxxxx           # 任意
-    aliases: [曲名, Song Title]                 # 動画タイトルに含まれていれば該当
-    official_channel_ids: [UCxxxxxxxxxxxxxxxxxxxxxx]
-    # exclude_keywords: [曲名2]                  # 似た名前の別曲を除外
+  - name: "曲名X"
+    playlist: {id: "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "曲名X"}
+    aliases: ["曲名X", "Kyokumei X"]
+    official_channels:
+      - {id: "UCffffffffffffffffffffff", name: "曲名Xの公式チャンネル"}

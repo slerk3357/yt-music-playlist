@@ -201,5 +201,5 @@ class YouTube:
         }), "insert")
         return r["id"]
 
-    def delete_item(self, item_id: str) -> None:
-        self._exec(self.s.playlistItems().delete(id=item_id), "delete")
+    # 削除系のAPI（playlistItems.delete 等）は意図的に実装していない。データ保護のため、
+    # このプログラムは再生リストから動画を消すことができない。
