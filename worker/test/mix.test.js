@@ -93,26 +93,47 @@ function setupWorld({ location = "https://www.youtube.com/watch?v=a1&list=TLGGxy
   return calls;
 }
 
-const ENV = { ACCESS_KEY: "secret-key", GITHUB_TOKEN: "gh-token", GITHUB_REPO: "me/private", CACHE_SECONDS: "0" };
+const ENV = { GITHUB_TOKEN: "gh-token", GITHUB_REPO: "me/private", CACHE_SECONDS: "0", ALLOWED_EMAILS: "me@gmail.com" };
+// Cloudflare Access で認証されたときに渡される ctx
+const CTX = { access: { aud: "aud", getIdentity: async () => ({ email: "Me@gmail.com" }) } };
 
-test("アクセスキーが違えば 404", async () => {
+test("Cloudflare Access で認証されていなければ 403", async () => {
   setupWorld();
-  const res = await worker.fetch(new Request("https://mix.example/wrong/random"), ENV, {});
-  assert.equal(res.status, 404);
+  const res = await worker.fetch(new Request("https://mix.example/random"), ENV, {});
+  assert.equal(res.status, 403);
+});
+
+test("許可していないメールアドレスなら 403", async () => {
+  setupWorld();
+  const other = { access: { getIdentity: async () => ({ email: "someone@example.com" }) } };
+  assert.equal((await worker.fetch(new Request("https://mix.example/random"), ENV, other)).status, 403);
+  const broken = { access: { getIdentity: async () => { throw new Error("x"); } } };
+  assert.equal((await worker.fetch(new Request("https://mix.example/random"), ENV, broken)).status, 403);
+});
+
+test("合言葉を設定した場合は URL の先頭にも必要", async () => {
+  setupWorld();
+  const env = { ...ENV, ACCESS_KEY: "secret-key" };
+  assert.equal((await worker.fetch(new Request("https://mix.example/wrong/random"), env, CTX)).status, 404);
+  assert.equal((await worker.fetch(new Request("https://mix.example/random"), env, CTX)).status, 404);
+  const ok = await worker.fetch(new Request("https://mix.example/secret-key/random"), env, CTX);
+  assert.equal(ok.status, 302);
+  const menu = await (await worker.fetch(new Request("https://mix.example/secret-key/"), env, CTX)).text();
+  assert.match(menu, /href="\/secret-key\/random"/);
 });
 
 test("ミックスは YouTube Music の一時リストへ 302", async () => {
   setupWorld();
-  const res = await worker.fetch(new Request("https://mix.example/secret-key/top/A?n=5"), ENV, {});
+  const res = await worker.fetch(new Request("https://mix.example/top/A?n=5"), ENV, CTX);
   assert.equal(res.status, 302);
   assert.equal(res.headers.get("location"), "https://music.youtube.com/watch?v=a1&list=TLGGxyz");
-  const intent = await worker.fetch(new Request("https://mix.example/secret-key/random?app=intent"), ENV, {});
+  const intent = await worker.fetch(new Request("https://mix.example/random?app=intent"), ENV, CTX);
   assert.match(intent.headers.get("location"), /^intent:\/\/music\.youtube\.com\/watch\?v=a1&list=TLGGxyz#Intent;/);
 });
 
 test("format=json は選曲結果を返す", async () => {
   setupWorld();
-  const res = await worker.fetch(new Request("https://mix.example/secret-key/playlists?k=2&n=3&format=json"), ENV, {});
+  const res = await worker.fetch(new Request("https://mix.example/playlists?k=2&n=3&format=json"), ENV, CTX);
   const body = await res.json();
   assert.equal(body.playlists.length, 2);
   assert.ok(body.videos.length <= 3);
@@ -121,14 +142,14 @@ test("format=json は選曲結果を返す", async () => {
 
 test("一時リストを作れなければ watch_videos の URL へ", async () => {
   setupWorld({ location: "https://consent.youtube.com/m" });
-  const res = await worker.fetch(new Request("https://mix.example/secret-key/random?n=2"), ENV, {});
+  const res = await worker.fetch(new Request("https://mix.example/random?n=2"), ENV, CTX);
   assert.match(res.headers.get("location"), /^https:\/\/www\.youtube\.com\/watch_videos\?video_ids=/);
 });
 
 test("メニューに各ミックスへのリンクがある", async () => {
   setupWorld();
-  const res = await worker.fetch(new Request("https://mix.example/secret-key/"), ENV, {});
+  const res = await worker.fetch(new Request("https://mix.example/"), ENV, CTX);
   const html = await res.text();
-  assert.match(html, /href="\/secret-key\/random"/);
-  assert.match(html, /href="\/secret-key\/top\/A"/);
+  assert.match(html, /href="\/random"/);
+  assert.match(html, /href="\/top\/A"/);
 });

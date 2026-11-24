@@ -127,41 +127,60 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 
 | ミックス | URL | 選曲の対象 |
 |---|---|---|
-| メニュー | `/<合言葉>/` | 下の各ミックスへのリンク（スマホのホーム画面に置く用） |
-| 完全ランダム | `/<合言葉>/random` | 管理しているすべての再生リストの曲 |
-| ランダム再生リスト | `/<合言葉>/playlists?k=3` | ランダムに選んだ k 個の再生リストの曲 |
-| 特にお気に入りのチャンネル | `/<合言葉>/top/<name>` | その人の ○○チャンネル＋その他○○＋特別再生リストの曲 |
+| メニュー | `/` | 下の各ミックスへのリンク（スマホのホーム画面に置く用） |
+| 完全ランダム | `/random` | 管理しているすべての再生リストの曲 |
+| ランダム再生リスト | `/playlists?k=3` | ランダムに選んだ k 個の再生リストの曲 |
+| 特にお気に入りのチャンネル | `/top/<name>` | その人の ○○チャンネル＋その他○○＋特別再生リストの曲 |
 
-- **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」と `ignore_playlists` は含めません。削除・非公開になった曲も除きます。
+- **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」と `ignore_playlists`、削除・非公開になった曲は含めません。
 - **共通のオプション:** `n=50`（曲数。1〜50、既定は50）、`open=list`（曲一覧の画面を開く）、`app=intent`（Android でブラウザが開いてしまうとき）、`format=json`（リダイレクトせず選曲結果を表示）。
 - **選び直し:** リンクを開くたびに選び直します。同じ曲は1回だけです。
 
 **しくみ**
 1. 毎日の同期が、ミックス用の索引 `data/mix/index.json` を非公開リポジトリに書き出します。
-2. Cloudflare Worker（`worker/`）が、読み取り専用トークンでその索引を読みます（10分キャッシュ）。
-3. 選んだ曲で `watch_videos` を呼んで一時リスト（`TLGG…`）を作り、`music.youtube.com` へ HTTP 302 でリダイレクトします。Android ならそのまま YouTube Music アプリが開きます。
+2. Cloudflare Worker（`worker/`）が、読み取り専用トークンでその索引を読みます（10分キャッシュ）。索引はデプロイに含めず実行時に読むので、毎日の同期のたびに Worker を作り直す必要はありません。
+3. 選んだ曲で `watch_videos` を呼んで一時リスト（`TLGG…`）を作り、`music.youtube.com` へ HTTP 302 でリダイレクトします。
+4. Worker は Cloudflare Access で保護し、自分の Google アカウントでログインしたときだけ使えます。Worker 側でも、Access で認証されていないリクエストや、`ALLOWED_EMAILS` 以外のアカウントは拒否します。
 
-**セットアップ**
-1. **GitHub のトークン:** Settings → Developer settings → Fine-grained tokens で作成します。Repository access は**非公開リポジトリだけ**、Permissions は **Contents: Read-only** だけにします。
-2. **Cloudflare:** アカウントを作り、手元で次を実行します。
-   ```bash
-   cd worker
-   npm install
-   npx wrangler login
-   npx wrangler secret put GITHUB_REPO    # 例: your-name/your-private-repo
-   npx wrangler secret put GITHUB_TOKEN   # 1 のトークン
-   npx wrangler secret put ACCESS_KEY     # 合言葉。例: openssl rand -hex 24 で作った文字列
-   npx wrangler deploy
-   ```
-3. 表示された `https://yt-music-mix.<あなたのサブドメイン>.workers.dev/<合言葉>/` をスマホで開き、ホーム画面に追加します。
+### セットアップ（Cloudflare のダッシュボードで操作。手元に wrangler は不要）
+
+画面の名前は変わることがあります。見つからないときは、Cloudflare のドキュメント（Workers Builds、Cloudflare Access）を参照してください。
+
+**1. GitHub のトークン**
+GitHub の Settings → Developer settings → Fine-grained tokens で作成します。Repository access は**非公開リポジトリだけ**、Permissions は **Contents: Read-only** だけにします（有効期限を付けた場合は、切れる前に作り直してシークレットを更新します）。
+
+**2. Worker を作ってリポジトリを接続（自動デプロイ）**
+1. Cloudflare ダッシュボードの Workers & Pages → 作成 → リポジトリをインポート（Import a repository）を選びます。GitHub と連携し、**非公開リポジトリ**を選びます。
+2. 設定は次のとおりにします。
+   - プロジェクト名（Worker 名）: `yt-music-mix`（`worker/wrangler.toml` の `name` と同じにする必要があります）
+   - ルートディレクトリ: `worker`
+   - ビルドコマンド: 空欄、デプロイコマンド: `npx wrangler deploy`（既定のまま）
+3. Worker の Settings → Build → Build watch paths の Include paths を `worker/*` にします（毎日の同期の commit で作り直さないため）。
+4. 以後は、`worker/` を変更して main に push すると、自動でデプロイされます。
+
+**3. 変数とシークレット**
+Worker の Settings → Variables and Secrets で、次を**シークレット**として追加します。
+| 名前 | 値 |
+|---|---|
+| `GITHUB_REPO` | 非公開リポジトリ（例: `your-name/your-private-repo`） |
+| `GITHUB_TOKEN` | 1 のトークン |
+| `ALLOWED_EMAILS` | 使う Google アカウントのメールアドレス（複数ならカンマ区切り） |
+| `ACCESS_KEY` | （任意）URL の先頭に付ける合言葉。付けると `/<合言葉>/random` のような URL になります |
+
+**4. Google ログイン（Cloudflare Access）**
+1. Google Cloud Console（YouTube 用とは別のプロジェクトでもかまいません）で OAuth 同意画面を作り、「OAuth クライアント ID」を種類「ウェブ アプリケーション」で作成します。承認済みのリダイレクト URI は `https://<チーム名>.cloudflareaccess.com/cdn-cgi/access/callback` です。同意画面が「テスト」のままなら、テストユーザーに自分のアカウントを追加します（ログインに使うだけなので、「テスト」のままでも7日ごとのログインし直しは起きません）。
+2. Cloudflare の Zero Trust（Cloudflare One）→ Integrations → Identity providers で Google を追加し、1 のクライアント ID とシークレットを入力します。
+3. Worker の **Access** タブ → Protect this Worker behind Access → **All traffic** を選んで適用します。こうすると workers.dev の URL もプレビュー用の URL も、すべてログインが必要になります。
+4. Zero Trust の Access のポリシーを編集し、許可する対象を自分のメールアドレス（Emails）に、ログイン方法を Google に限定します。セッションの有効期間は長め（例：1か月）にすると、毎回ログインせずに済みます。
+5. スマホで `https://yt-music-mix.<あなたのサブドメイン>.workers.dev/` を開き、Google でログインしてから、ホーム画面に追加します。
 
 **注意**
-- **合言葉:** URL を知っている人は、誰でもミックスを作れます（再生リストの曲が分かります）。URL は人に教えないでください。漏れたら `ACCESS_KEY` を変えて、もう一度 deploy します。
+- **ログイン後のアプリ起動:** ログイン画面を経由した直後は、YouTube Music アプリではなくブラウザで開くことがあります。2回目以降（ログイン済み）は、そのままアプリが開きます。ブラウザで開いてしまう場合は `?app=intent` を付けてください。
 - **iPhone:** 別ドメインからのリダイレクトではアプリが開かず、Safari で Web 版の YouTube Music が開きやすくなります（画面上部のバナーからアプリに切り替えられます）。
 - **一時リスト:** 時間がたつと使えなくなるので、保存用ではなく「今聴く」用です。残したいときは、YouTube Music の再生画面の「保存」から再生リストに保存できます。
 - **非公式の仕組み:** `watch_videos` は YouTube の公式APIではないので、仕様が変わると動かなくなる可能性があります。一時リストを作れなかったときは、`watch_videos` の URL を直接開きます（YouTube のアプリかブラウザで再生されます）。
 - **再生できない曲:** YouTube Music で再生できない動画は、リストの中でグレー表示になるか、飛ばされます。
-- **テスト:** `cd worker && npm test`
+- **テスト:** `node --test worker/test/*.test.js`（Node.js だけで動きます）
 
 ## バックアップと復元
 `data/playlists/*.yaml` の各曲には `status` が付きます。

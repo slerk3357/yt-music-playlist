@@ -1,9 +1,13 @@
 // オリジナルミックスリスト API（Cloudflare Worker）
 //
-//   GET /<ACCESS_KEY>/                 メニュー（各ミックスへのリンク）
-//   GET /<ACCESS_KEY>/random           完全ランダム
-//   GET /<ACCESS_KEY>/playlists?k=3    ランダムに選んだ k 個の再生リストから
-//   GET /<ACCESS_KEY>/top/<name>       特にお気に入りのチャンネル <name>（または番号）の再生リストから
+//   GET /                   メニュー（各ミックスへのリンク）
+//   GET /random             完全ランダム
+//   GET /playlists?k=3      ランダムに選んだ k 個の再生リストから
+//   GET /top/<name>         特にお気に入りのチャンネル <name>（または番号）の再生リストから
+//
+// 認証：Worker を Cloudflare Access で保護し（Google ログイン）、Access で認証されていない
+// リクエストは拒否する。ALLOWED_EMAILS を設定すると、そのメールアドレスだけに限定する。
+// ACCESS_KEY を設定した場合は、URL の先頭に /<ACCESS_KEY> も必要になる（任意・二重の鍵）。
 //
 // 共通のクエリ:
 //   n=50           曲数（1〜50）
@@ -77,6 +81,7 @@ li{list-style:none}ul{padding:0}small{color:#666}h2{margin-top:1.5em;font-size:1
 <ul>${link(`${base}/random`, "完全ランダム")}${link(`${base}/playlists?k=3`, "ランダム再生リスト", "3つの再生リストから")}</ul>
 <h2>特にお気に入りのチャンネル</h2><ul>${tops || "<li><small>なし</small></li>"}</ul>
 <p><small>リンクを開くたびに選び直します。Android でブラウザが開く場合は、URL に <code>?app=intent</code> を付けてください。</small></p>
+<p><small><a href="${escapeHtml(base)}/random?app=intent">完全ランダム（Android アプリを指定）</a></small></p>
 </body></html>`;
 }
 
@@ -86,30 +91,53 @@ function json(data, status = 200) {
   });
 }
 
+/**
+ * Cloudflare Access で認証されたリクエストか確かめる。
+ * Worker 単位で Access を有効にすると ctx.access が渡される（認証されていなければ undefined）。
+ */
+export async function authorize(env, ctx) {
+  if (env.REQUIRE_ACCESS === "false") return null; // 手元での試験用。本番では使わない
+  if (!ctx?.access) return "Cloudflare Access によるログインが必要です（Worker の Access 設定を確認してください）";
+  const allowed = String(env.ALLOWED_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (allowed.length === 0) return null;
+  let email = "";
+  try {
+    email = String((await ctx.access.getIdentity())?.email || "").toLowerCase();
+  } catch {
+    email = "";
+  }
+  return allowed.includes(email) ? null : "このアカウントでは利用できません";
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const denied = await authorize(env, ctx);
+    if (denied) return new Response(denied, { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+
     const url = new URL(request.url);
-    const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-    // アクセスキーが合わなければ、存在しないページとして扱う
-    if (!env.ACCESS_KEY || !safeEqual(parts[0] ?? "", env.ACCESS_KEY)) {
-      return new Response("Not Found", { status: 404 });
+    let parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    let base = "";
+    if (env.ACCESS_KEY) {
+      // 合言葉が合わなければ、存在しないページとして扱う
+      if (!safeEqual(parts[0] ?? "", env.ACCESS_KEY)) return new Response("Not Found", { status: 404 });
+      base = `/${encodeURIComponent(parts[0])}`;
+      parts = parts.slice(1);
     }
-    const base = `/${encodeURIComponent(parts[0])}`;
     let index;
     try {
       index = await loadIndex(env, ctx);
     } catch (e) {
       return new Response(String(e.message || e), { status: 502 });
     }
-    if (parts.length === 1) {
+    if (parts.length === 0) {
       return new Response(menu(index, base), {
         headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       });
     }
 
     const q = Object.fromEntries(url.searchParams);
-    const mode = parts[1];
-    const mix = pickMix(index, mode, { ...q, name: parts[2] });
+    const mode = parts[0];
+    const mix = pickMix(index, mode, { ...q, name: parts[1] });
     if (mix.error) return format(q) === "json" ? json(mix, mix.status) : new Response(mix.error, { status: mix.status });
     if (mix.videos.length === 0) return new Response("対象の曲がありません", { status: 404 });
 

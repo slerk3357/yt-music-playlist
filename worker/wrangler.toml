@@ -1,15 +1,20 @@
 # オリジナルミックスリスト API（Cloudflare Worker）
-# デプロイ手順は README.md の「オリジナルミックスリスト」を参照。
+# Cloudflare のダッシュボードからリポジトリを接続して自動デプロイする（README の「オリジナルミックスリスト」）。
+# ダッシュボードの Worker 名は、ここの name と同じにする必要がある。
 name = "yt-music-mix"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
+
+# ダッシュボードで追加した変数を、デプロイのたびに消さない
+keep_vars = true
 
 [vars]
 GITHUB_BRANCH = "main"
 INDEX_PATH = "data/mix/index.json"
 CACHE_SECONDS = "600"   # 索引をキャッシュする秒数
 
-# 次の値は、このファイルには書かずに wrangler secret put で登録する
-#   GITHUB_REPO  : 索引を置いている非公開リポジトリ（例: your-name/your-private-repo）
-#   GITHUB_TOKEN : その非公開リポジトリの Contents を読むだけの fine-grained トークン
-#   ACCESS_KEY   : URL に含める合言葉（長いランダムな文字列）
+# 次の値は、このファイルには書かずにダッシュボードの「変数とシークレット」でシークレットとして登録する
+#   GITHUB_REPO    : 索引を置いている非公開リポジトリ（例: your-name/your-private-repo）
+#   GITHUB_TOKEN   : その非公開リポジトリの Contents を読むだけの fine-grained トークン
+#   ALLOWED_EMAILS : 使ってよい Google アカウントのメールアドレス（複数ならカンマ区切り）
+#   ACCESS_KEY     : （任意）URL の先頭に付ける合言葉。Access に加えて二重に鍵をかけたいとき
