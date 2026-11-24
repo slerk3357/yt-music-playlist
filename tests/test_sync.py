@@ -60,9 +60,16 @@ class FakeYouTube(YouTube):
             out += [dict(self.v[x]) for x in ids[i:i + 50] if x in self.v]
         return out
 
-    def channel_handles(self, ids):
+    titles = {}          # チャンネルID -> 今のチャンネル名（なければIDのまま）
+    missing_channels = set()
+
+    def channels_info(self, ids):
         self._spend("list")
-        return {i: self.handles[i] for i in ids if i in self.handles}
+        return {i: {"title": self.titles.get(i, i), "handle": self.handles.get(i)}
+                for i in ids if i not in self.missing_channels}
+
+    def channel_handles(self, ids):
+        return {c: v["handle"] for c, v in self.channels_info(ids).items() if v["handle"]}
 
     def create_playlist(self, title, privacy):
         self._spend("insert")
@@ -356,3 +363,43 @@ def test_ignore_playlists(tmp_path):
     with pytest.raises(SystemExit) as e:
         run(yt=yt, now=day(1, 11), **kw(tmp_path))
     assert "ignore_playlists" in str(e.value)
+
+
+def test_pull_config(tmp_path):
+    from ytpl import pull_config
+    yt = setup(tmp_path)
+    p = tmp_path / "config.yaml"
+    yt.pl["PLalice"]["title"] = "アリス（新しい名前）"         # 改名
+    del yt.pl["PLaliceOther"]                                   # YouTube上で消えた
+    yt.pl["PLfree"] = {"title": "作業用", "items": []}          # 未登録
+    yt.titles = {A: "Alice Official", B: "ボブ"}
+    yt.missing_channels = {D}
+    before = p.read_text(encoding="utf-8")
+
+    cfg = Config(p)
+    log = "\n".join(pull_config.pull(cfg, yt))
+    cfg.save()
+    text = p.read_text(encoding="utf-8")
+    assert "再生リスト名を更新" in log and "アリス（新しい名前）" in log
+    assert "再生リストが見つかりません" in log and "PLaliceOther" in log
+    assert "チャンネルが見つかりません" in log and D in log
+    assert 'playlist: {id: "PLalice", name: "アリス（新しい名前）"}' in text
+    assert '- {id: "PLfree", name: "作業用"} # 要確認' in text
+    assert 'name: "アリス"\n' in text                    # 3分類の name は変えない
+    assert '{id: "' + A + '", name: "アリス"}' in text     # チャンネル名は既定では変えない
+    for c in ("# 先頭のコメント", "# 行末のコメント", "# 曲のコメント"):
+        assert c in text
+    cfg2 = Config(p)
+    assert rules.validate(cfg2) == []
+    # 2回目は変化なし（追加済みの「作業用」を二重に追加しない）
+    assert not any(x.startswith(("✎", "＋")) for x in pull_config.pull(cfg2, yt))
+
+    # --channel-names
+    cfg3 = Config(p)
+    log = "\n".join(pull_config.pull(cfg3, yt, channel_names=True))
+    cfg3.save()
+    text = p.read_text(encoding="utf-8")
+    assert "チャンネル名を更新" in log
+    assert '{id: "' + A + '", name: "Alice Official"}' in text
+    assert 'name: "アリス"\n' in text                    # それでも3分類の name は変えない
+    assert before != text

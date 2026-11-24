@@ -260,6 +260,26 @@ python -m ytpl.check other.yaml # ほかのファイルを確認
 - **ドライラン：** ドライランでは何も書き込みません。
 - **手で編集していた場合：** 実行中に手で編集・pushしていても、ワークフローは最新の変更を取り込んでから push します。同じ行を両方で変えた場合だけ、push が失敗します。
 
+### 手元で YouTube の状態を反映する（pull_config）
+
+YouTube上の今の状態を、手元の `config.yaml` に反映するコマンドです。読み取りだけで、APIの使用量は数ユニットです。
+
+```bash
+python -m ytpl.pull_config                  # 変更内容を表示し、config.yaml を更新
+python -m ytpl.pull_config --dry-run        # 表示だけ
+python -m ytpl.pull_config --channel-names  # {id, name} で書いたチャンネルの name も更新
+```
+
+| 内容 | config.yaml への反映 |
+|---|---|
+| 再生リストの `name` を、YouTube上の今のタイトルに更新（id で照合） | 書き換える |
+| YouTube上にない再生リスト・チャンネル | 警告だけ（変えない） |
+| YouTube上にあるが、`config.yaml` にも `ignore_playlists` にもない再生リスト | `ignore_playlists` の末尾に `# 要確認` 付きで追加（以後は無視される）。管理したい場合は、正しい場所に移してください |
+| `{id, name}` で書いたチャンネルの `name` | `--channel-names` のときだけ、今のチャンネル名に書き換える |
+| 3分類の項目の `name`（利用者が付ける識別名） | 変えない |
+
+書き換えは毎日の実行と同じく、コメント・クオート・並び順を保ちます。実行前に `git pull` し、実行後は `git diff` で確認してからコミットしてください。
+
 ### data/ と reports/
 
 | ファイル | 内容 |

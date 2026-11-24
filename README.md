@@ -117,6 +117,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 - 自動で昇格した曲は、`config.yaml` の `songs` の末尾に追加されます（`promoted_at` 付き）。取り消すときは、その曲を `songs` から消して `promotion.ignore` に曲名を追加します。
 - `playlist: {name: "…"}` のように id を書かずに再生リストを指定して main に push すると、数分後に作成され、id が `config.yaml` に書き込まれます（`git pull` で取り込んでください）。
 - 管理したくない再生リストは `ignore_playlists` に `{id, name}` で列挙します。
+- YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、手元で `python -m ytpl.pull_config` を実行します。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
 
 ## バックアップと復元

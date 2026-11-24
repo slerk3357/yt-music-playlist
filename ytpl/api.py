@@ -174,16 +174,20 @@ class YouTube:
                 })
         return out
 
-    def channel_handles(self, ids: list[str]) -> dict[str, str]:
-        """チャンネルID -> @ハンドル"""
+    def channels_info(self, ids: list[str]) -> dict[str, dict]:
+        """チャンネルID -> {"title", "handle"}。存在しないチャンネルは結果に含まれない。"""
         out = {}
         for i in range(0, len(ids), 50):
             r = self._exec(self.s.channels().list(part="snippet", id=",".join(ids[i:i + 50])), "list")
             for it in r.get("items", []):
                 h = it["snippet"].get("customUrl")
-                if h:
-                    out[it["id"]] = h if h.startswith("@") else "@" + h
+                out[it["id"]] = {"title": it["snippet"].get("title"),
+                                 "handle": (h if h.startswith("@") else "@" + h) if h else None}
         return out
+
+    def channel_handles(self, ids: list[str]) -> dict[str, str]:
+        """チャンネルID -> @ハンドル"""
+        return {c: i["handle"] for c, i in self.channels_info(ids).items() if i["handle"]}
 
     def search_video_ids(self, query: str, published_after: str | None) -> list[str]:
         kw = dict(part="snippet", q=query, type="video", maxResults=50, order="date")
