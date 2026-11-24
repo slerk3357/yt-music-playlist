@@ -38,7 +38,33 @@ class FakeYouTube(YouTube):
         return [{"id": k, "title": p["title"], "description": p.get("description", ""), "count": len(p["items"])}
                 for k, p in self.pl.items()]
 
+    topic_channels = set()   # アップロード一覧（UU…）が見つからないチャンネル
+    albums = {}              # チャンネルID -> {再生リストID: [動画ID]}
+    searchable = {}          # チャンネルID -> [動画ID]（検索で見つかる）
+
+    def uploads_id(self, cid):
+        self._spend("list")
+        return None if cid in self.topic_channels else "UU" + cid[2:]
+
+    def section_playlists(self, cid):
+        self._spend("list")
+        return list(self.albums.get(cid, {}))
+
+    def search_channel_video_ids(self, cid, after=None):
+        self._spend("search")
+        return list(self.searchable.get(cid, []))
+
     def playlist_pages(self, pid):
+        from ytpl.api import ApiError
+        if pid.startswith("UU") and "UC" + pid[2:] in self.topic_channels:
+            self._spend("list")
+            raise ApiError(404, "playlistNotFound")
+        for albums in self.albums.values():
+            if pid in albums:
+                rows = [{"item_id": f"{pid}-{i}", "video_id": i} for i in albums[pid]]
+                self._spend("list")
+                yield rows
+                return
         if pid.startswith("UU"):
             cid = "UC" + pid[2:]
             ids = [v["id"] for v in sorted(self.v.values(), key=lambda x: x["published_at"], reverse=True)
@@ -125,6 +151,7 @@ songs:
   - name: "星の歌"
     aliases: ["星の歌", "Hoshi no Uta"]
     official_channels: [{{id: "{O}", name: "公式"}}]
+    original_artists: ["作者X"]
 """
 
 
@@ -133,17 +160,17 @@ def setup(tmp_path, config=CONFIG):
     vids = [
         V("a1", "『オリジナル曲』アリス MV", A, "01-01"),
         V("a1t", "オリジナル曲", AT, "01-01", desc="Provided to YouTube by Label", ch_title="アリス - Topic"),
-        V("a2", "【歌ってみた】星の歌 / アリス", A, "01-02", cat="24"),
+        V("a2", "【歌ってみた】星の歌 / アリス", A, "01-02", cat="24", desc="原曲: 作者X"),
         V("a3", "アリス 雑談配信", A, "01-03", cat="24", dur=7200),
         V("a4", "オリジナル曲 (Instrumental)", A, "01-03"),
         V("o1", "星の歌 (Official MV)", O, "01-01"),
         V("o2", "全然関係ない曲", O, "01-01"),
         V("b1", "【cover】夜の曲 / ボブ", B, "01-04", cat="24"),
-        V("c1", "Hoshi no Uta covered by キャロル", CA, "01-05"),
+        V("c1", "Hoshi no Uta covered by キャロル", CA, "01-05", desc="song by 作者X"),
         V("c2", "夜の曲 / キャロル × デイブ", CA, "01-06", desc="with @dave"),
         V("c3", "朝の曲 / キャロル", CA, "01-07", desc="mix: Alice"),
         V("c5", "昼の曲 / キャロル", CA, "01-07", desc="mix: @alice_official"),
-        V("d1", "夜の曲 歌ってみた デイブ", D, "01-08", cat="24"),
+        V("d1", "夜の曲 歌ってみた / デイブ", D, "01-08", cat="24"),
         V("d2", "切り抜き", D, "01-09"),
     ]
     playlists = {
@@ -192,7 +219,9 @@ def test_first_run_and_incremental(tmp_path):
     # 新着
     yt.v["b2"] = V("b2", "ボブ 新曲 MV", B, "02-01")
     yt.v["d3"] = V("d3", "知らない曲 / デイブ", D, "02-02")
-    yt.v["d4"] = V("d4", "星の歌 歌ってみた / デイブ", D, "02-03", cat="24")
+    yt.v["d4"] = V("d4", "星の歌 歌ってみた / デイブ", D, "02-03", cat="24", desc="原曲 @official_x")
+    yt.handles = {**yt.handles, O: "@official_x"}
+    yt.v["d7"] = V("d7", "星の歌 / デイブ", D, "02-08", desc="同名の別の曲")    # 原曲の手がかりなし → 未仕分け
     yt.v["a5"] = V("a5", "『新曲』アリス MV", A, "02-04")
     yt.v["c6"] = V("c6", "風の曲 / キャロル", CA, "02-05", desc="feat. Alice")
     yt.v["c7"] = V("c7", "雨の曲 / キャロル", CA, "02-06", desc="feat. @alice_official")
@@ -201,7 +230,7 @@ def test_first_run_and_incremental(tmp_path):
     t = titles(yt)
     # b2: お気に入りの○○チャンネル候補 / d3: どこにも入らない / c6: 名前だけで一致 / c7: その他アリス候補
     # d5: オフボーカルは含める設定の再生リストがないので入れない
-    assert t["未仕分け"] == ["c7", "c6", "d3", "b2"]       # 新しい順
+    assert t["未仕分け"] == ["d7", "c7", "c6", "d3", "b2"]       # 新しい順
     assert t["その他アリス"] == []
     assert "d4" in t["星の歌"] and "a5" in t["アリスチャンネル"]
     assert len(set(t["星の歌"])) == len(t["星の歌"])     # 2回目以降も二重追加しない
@@ -211,7 +240,8 @@ def test_first_run_and_incremental(tmp_path):
     yt.pl["PLalice"]["items"].remove("a2")
     run(yt=yt, now=day(2, 11), **kw(tmp_path))
     t = titles(yt)
-    assert t["未仕分け"] == ["c7", "c6", "d3", "b2"]
+    assert t["未仕分け"] == ["d7", "c7", "c6", "d3", "b2"]
+    assert "d7" not in t["星の歌"]
     assert "a2" not in t["アリスチャンネル"]            # 手で消した曲は戻さない
     led = load_yaml(tmp_path / "data/playlists/アリスチャンネル.yaml")
     assert {e["video_id"]: e["status"] for e in led["items"]}["a2"] == "missing"
@@ -421,3 +451,31 @@ def test_mix_index(tmp_path):
     assert all("d3" not in p["videos"] for p in idx["playlists"])
     top = idx["top_favorites"][0]
     assert top["name"] == "アリス" and top["playlists"] == ["PLalice", "PLaliceOther"]
+
+
+def test_topic_channel_fallbacks(tmp_path):
+    """アップロード一覧が見つからないチャンネル：棚の再生リスト → 検索 の順に取得する。"""
+    AT2, BT = C("alicetopic2"), C("bobtopic")
+    cfg = CONFIG.replace('      - {{id: "{AT}", name: "アリス - Topic"}}'.format(AT=AT),
+                         f'      - {{id: "{AT}", name: "アリス - Topic"}}\n      - {{id: "{AT2}", name: "アリス2 - Topic"}}')
+    cfg = cfg.replace('    channels: [{id: "' + B + '", name: "ボブ"}]',
+                      '    channels: [{id: "' + B + '", name: "ボブ"}, {id: "' + BT + '", name: "ボブ - Topic"}]')
+    yt = setup(tmp_path, cfg)
+    yt.topic_channels = {AT2, BT}
+    yt.v["t1"] = V("t1", "空の歌", AT2, "01-05", desc="Provided to YouTube by Label", ch_title="アリス2 - Topic")
+    yt.v["x1"] = V("x1", "他人の曲", C("someone"), "01-05")
+    yt.albums = {AT2: {"OLAKalbum1": ["t1", "x1"]}}           # アルバムに他人の曲が混ざっていても除く
+    yt.v["s1"] = V("s1", "海の歌", BT, "01-06", desc="Provided to YouTube by Label", ch_title="ボブ - Topic")
+    yt.searchable = {BT: ["s1"]}
+    text = run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    assert "t1" in titles(yt)["アリスチャンネル"] and "x1" not in titles(yt)["アリスチャンネル"]
+    from ytpl.store import Catalog
+    cat = Catalog(tmp_path / "data/catalog")
+    assert cat.channels[AT2]["source"] == "sections" and cat.channels[BT]["source"] == "search"
+    assert "s1" in cat.channels[BT]["videos"]
+    assert "動画一覧の取得方法を変更" in text
+    # 2回目は記録した方法をそのまま使う（UU… を試し直さない）
+    yt.v["t2"] = V("t2", "雲の歌", AT2, "02-01", desc="Provided to YouTube by Label", ch_title="アリス2 - Topic")
+    yt.albums[AT2]["OLAKalbum2"] = ["t2"]
+    run(yt=yt, now=day(2, 10), **kw(tmp_path))
+    assert "t2" in titles(yt)["アリスチャンネル"]

@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from . import titles
 from .store import Config
 
 # ==========================================================================
@@ -69,17 +70,10 @@ def is_music(v: dict, mcfg: dict) -> bool:
         or has_keyword(title, mcfg["include_keywords"])
 
 
-def extract_song_title(title: str) -> str:
-    """動画タイトルから曲名らしき部分を取り出す（ヒューリスティック）。"""
-    t = unicodedata.normalize("NFKC", title or "")
-    m = re.search(r"[「『]([^」』]+)[」』]", t)
-    if m:
-        return m.group(1).strip()
-    t = re.sub(r"【[^】]*】|\[[^\]]*\]|#\S+", " ", t)
-    t = re.split(r"\s*[/|]\s*|\s+-\s+|\s+feat\.?\s|\s+ft\.?\s|\s+covered by\s", t, flags=re.I)[0]
-    t = re.sub(r"\([^)]*\)", " ", t)
-    t = re.sub(r"(?i)(official music video|music video|歌ってみた|full ver\.?|cover|カバー|\bmv\b)", " ", t)
-    return re.sub(r"\s+", " ", t).strip(" -_~・")
+def extract_song_title(title: str, artists: set[str] = frozenset()) -> str:
+    """動画タイトルから曲名らしい部分を取り出す（titles.segments の先頭）。"""
+    segs = titles.segments(title, artists)
+    return segs[0][1] if segs else unicodedata.normalize("NFKC", title or "").strip()
 
 
 VERSION_RE = re.compile(
@@ -115,8 +109,27 @@ def is_art_track(v: dict) -> bool:
         or (v.get("channel_title") or "").endswith(" - Topic")
 
 
-def song_key(v: dict) -> tuple[str, str]:
-    return nz(extract_song_title(v.get("title") or "")), version_tag(v.get("title") or "")
+def song_key(v: dict, artists: set[str] = frozenset()) -> tuple[str, str]:
+    """重複判定に使う (曲名, バージョン)。曲名はアーティスト名の部分を除いた候補をつなげたもの。"""
+    segs = titles.segments(v.get("title"), artists | {titles.artist_key(v.get("channel_title"))})
+    base = "|".join(k for k, _ in segs) or nz(v.get("title"))
+    return base, version_tag(v.get("title") or "")
+
+
+def known_artists(cfg: Config) -> set[str]:
+    """設定に書かれたアーティスト名・チャンネル名（タイトルからアーティスト名の部分を除くのに使う）。"""
+    names: list = []
+    for _, _, _, e in tier_entries(cfg):
+        names += [e.get("name")] + list(e.get("aliases") or [])
+        names += [r.get("name") for r in e.get("channels") or [] if isinstance(r, dict)]
+        for sp in e.get("specials") or []:
+            for fld in ("published_by", "mentions"):
+                names += [r.get("name") if isinstance(r, dict) else r for r in sp.get(fld) or []]
+            names += list(sp.get("mention_aliases") or [])
+    for s in cfg.songs():
+        names += [r.get("name") if isinstance(r, dict) else r for r in s.get("official_channels") or []]
+        names += list(s.get("original_artists") or [])
+    return {k for k in (titles.artist_key(n) for n in names if isinstance(n, str)) if len(k) >= 2}
 
 
 MV_RE = re.compile(r"\bmv\b|\bpv\b|music video|ミュージックビデオ")
@@ -250,6 +263,8 @@ def handle_channel_ids(cfg: Config) -> set[str]:
         out |= set(ids(e.get("channels")))
         for sp in e.get("specials") or []:
             out |= set(chan_ids(cfg, sp.get("mentions")))
+    for s in cfg.songs():
+        out |= set(chan_ids(cfg, s.get("official_channels")))   # 原曲の手がかり（概要欄の @ハンドル）
     return out
 
 
@@ -370,6 +385,9 @@ def validate(cfg: Config) -> list[str]:
             errors.append(f"{w}: name がありません")
         check_pl(s.get("playlist"), f"{w}.playlist")
         check_channels(s.get("official_channels"), f"{w}.official_channels")
+        oa = s.get("original_artists")
+        if oa is not None and (not isinstance(oa, list) or not all(isinstance(x, str) for x in oa)):
+            errors.append(f"{w}.original_artists: 文字列のリストで書いてください")
     return errors
 
 
@@ -378,6 +396,8 @@ def validate(cfg: Config) -> list[str]:
 # ==========================================================================
 HANDLE_RE = re.compile(r"@[\w.\-]+")
 UCID_RE = re.compile(r"uc[0-9a-z_-]{22}")
+# 概要欄の動画へのリンク（原曲の動画を示す手がかり）
+VIDEO_LINK_RE = re.compile(r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:[^\s]*&)?v=|shorts/|embed/|live/))([0-9a-z_-]{11})")
 
 
 @dataclass
@@ -388,6 +408,8 @@ class Rec:
     tz: str       # nz(タイトル)
     xz: str       # nz(タイトル＋概要欄)
     key: tuple    # (曲名, バージョン)
+    segs: list    # 曲名の候補（比較用キー）。アーティスト名の部分は除いてある
+    segd: list    # 曲名の候補（表示用）
     art: bool     # TOPIC等の自動生成音源
     mv: bool      # タイトルにMV表記
     off: bool     # インスト・オフボーカル
@@ -402,18 +424,26 @@ class Index:
         self.by_ch: dict[str, set[str]] = defaultdict(set)
         self.by_ref: dict[str, set[str]] = defaultdict(set)
         self._grams: dict[str, set[str]] | None = None
+        videos = list(videos)
+        # 既知のアーティスト名：設定の名前＋監視しているチャンネルの名前
+        self.artists = known_artists(cfg) | {
+            k for k in (titles.artist_key(v.get("channel_title")) for v in videos) if len(k) >= 2}
         for v in videos:
             vid = v["id"]
             if vid in ignore or not is_music(v, mcfg):
                 continue
             t = nfkc(v.get("title"))
             x = t + ("\n" + nfkc(v.get("description")) if use_desc else "")
-            rec = Rec(v, v.get("channel_id"), t, nz(t), nz(x), song_key(v), is_art_track(v), bool(MV_RE.search(t)),
-                      is_off_vocal(v.get("title")))
+            segs = titles.segments(v.get("title"), self.artists | {titles.artist_key(v.get("channel_title"))})
+            key = ("|".join(k for k, _ in segs) or nz(t), version_tag(v.get("title") or ""))
+            rec = Rec(v, v.get("channel_id"), t, nz(t), nz(x), key, [k for k, _ in segs], [d for _, d in segs],
+                      is_art_track(v), bool(MV_RE.search(t)), is_off_vocal(v.get("title")))
             self.r[vid] = rec
             self.by_ch[rec.ch].add(vid)
-            for tok in set(HANDLE_RE.findall(x)) | set(UCID_RE.findall(x)):
-                self.by_ref[tok.rstrip(".-")].add(vid)
+            toks = set(HANDLE_RE.findall(x)) | set(UCID_RE.findall(x)) | \
+                {"v:" + m for m in VIDEO_LINK_RE.findall(x)}
+            for tok in toks:
+                self.by_ref[tok.rstrip(".-") if tok.startswith("@") else tok].add(vid)
 
     def __contains__(self, vid):
         return vid in self.r
@@ -603,18 +633,39 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             pl = _pl(op, f"other:{key}:{i}", False, (key, i, "other", "playlist"), creatable=False)
             emit(pl, rest, set(), other)
 
-    # お気に入りの曲：公式＋登録チャンネルのカバー（自動）
+    # お気に入りの曲：公式＋登録チャンネルのカバー
+    #   完全一致（曲名の候補が曲名と同じ）で、原曲の手がかりがある → 自動
+    #   完全一致でも手がかりがない、または部分一致 → 確認（新曲は「未仕分け」へ）
+    #   手がかり：公式チャンネルの動画、公式チャンネルの @ハンドル/ID・公式の動画へのリンク・original_artists の名前が
+    #   タイトルか概要欄にある。official_channels も original_artists もない曲は、完全一致だけで自動
     for i, s in enumerate(cfg.songs()):
         official = set(chan_ids(cfg, s.get("official_channels")))
         pool = idx.channels(tier_channels | official)
-        hit = idx.alias_hits(list(s.get("aliases") or []) or [s["name"]], among=pool, field="tz")
+        names = list(s.get("aliases") or []) or [s["name"]]
+        keys = alias_keys(names)
+        exact, partial = set(), set()
+        for vid in idx.alias_hits(names, among=pool, field="tz"):
+            r = idx.r[vid]
+            if any(k in r.segs for k in keys):
+                exact.add(vid)
+            elif any(titles.word_match(n, d) for n in names for d in r.segd if nz(n) in nz(d)):
+                partial.add(vid)
         if s.get("exclude_keywords"):
-            hit -= idx.title_has(s["exclude_keywords"], hit)
+            exact -= idx.title_has(s["exclude_keywords"], exact)
+            partial -= idx.title_has(s["exclude_keywords"], partial)
+        originals = s.get("original_artists") or []
+        if official or originals:
+            off_videos = exact & idx.channels(official)
+            tokens = ref_tokens(official, handles) | {"v:" + v.lower() for v in off_videos}
+            evidence = off_videos | idx.mentioning(tokens) | idx.alias_hits(originals, among=exact | partial)
+            auto, cand = exact & evidence, (exact - evidence) | partial
+        else:
+            auto, cand = exact, partial
         ref = {"name": s["name"], **(s.get("playlist") or {})}
         off_ent = {c: "official:" + s["name"] for c in official if c not in ents}
         extra = frozenset((off_ent[c], idx.r[v].key) for c in off_ent for v in idx.by_ch.get(c, ())
                           if not idx.r[v].off)
-        emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), hit, set(), s,
+        emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), auto, cand, s,
              entity_of=ent_of(off_ent), extra_vocal=extra)
     return out
 
@@ -637,8 +688,12 @@ def needs_unsorted(vid: str, roles: dict, idx: Index, auto_hits: int, cand_hits:
     return roles.get(rec.ch, {}).get("role") in ("favorite", "occasional") and not auto_hits
 
 
-def promotion_candidates(cfg: Config, misc_titles: list[str], idx: Index, roles: dict) -> list[dict]:
-    """「その他の曲」のうち、本家/カバーが min_versions 曲以上ある曲（同じ人の同じ音源は1曲と数える）。"""
+def promotion_candidates(cfg: Config, misc_entries: list[dict], idx: Index, roles: dict) -> list[dict]:
+    """「その他の曲」のうち、本家/カバーが min_versions 曲以上ある曲（同じ人の同じ音源は1曲と数える）。
+
+    曲名はタイトルからアーティスト名の部分を除いて取り出し、数えるのは曲名の候補が完全に一致する動画だけ。
+    misc_entries は台帳の項目（video_id, title, channel_title）。
+    """
     p = cfg.section("promotion")
     if not p["enabled"]:
         return []
@@ -650,15 +705,18 @@ def promotion_candidates(cfg: Config, misc_titles: list[str], idx: Index, roles:
         known |= set(alias_keys(list(s.get("aliases") or []) + [s["name"]]))
     ignored = set(alias_keys(p["ignore"]))
     out, seen = [], set()
-    for title in misc_titles:
-        name = extract_song_title(title or "")
+    for e in misc_entries:
+        rec = idx.r.get(e.get("video_id"))
+        if rec is not None:
+            name = rec.segd[0] if rec.segd else ""
+        else:
+            name = extract_song_title(e.get("title") or "",
+                                      idx.artists | {titles.artist_key(e.get("channel_title"))})
         key = nz(name)
-        if len(key) < 2 or key in seen or key in ignored:
+        if len(key) < 2 or key in seen or key in ignored or key in known or key in idx.artists:
             continue
         seen.add(key)
-        if any(k in key or key in k for k in known):
-            continue
-        count = len({(ents.get(r.ch, r.ch), r.key) for r in pool if key in r.tz})
+        count = len({(ents.get(r.ch, r.ch), r.key) for r in pool if key in r.segs})
         if count >= int(p["min_versions"]):
             out.append({"name": name, "aliases": [name], "versions": count})
     return out

@@ -47,22 +47,86 @@ def handles_of(state: dict) -> dict[str, str]:
     return {c: h["handle"] for c, h in (state.get("handles") or {}).items() if h.get("handle")}
 
 
-def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Report) -> list[str]:
-    """チャンネルのアップロード一覧を差分取得。新着ID（初回取込時は空）を返す。"""
+def _collect(pages, known: set, incremental: bool) -> list[str]:
+    """ページ（新しい順）から未知の動画IDを集める。差分取得では、未知のIDがないページで止める。"""
+    out: list[str] = []
+    for page in pages:
+        fresh = [x["video_id"] for x in page if x["video_id"] not in known and x["video_id"] not in out]
+        out += fresh
+        if incremental and not fresh:
+            break
+    return out
+
+
+def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Report,
+                   allow_search: bool = False) -> list[str]:
+    """チャンネルの動画を差分取得。新着ID（初回取込時は空）を返す。
+
+    通常はアップロード一覧（UU…）を読む。TOPIC チャンネルなど、アップロード一覧が見つからない場合は
+    次の順に代わりの方法を試し、うまくいった方法をカタログに記録して次回から使う。
+      1. チャンネル情報に書かれたアップロード一覧のID
+      2. チャンネルページの棚（アルバム・シングルなど）に並ぶ再生リスト（その動画のうち、このチャンネルのもの）
+      3. 検索（100ユニット。allow_search のときだけ。新しい順に最大50件）
+    """
     ch = catalog.channel(cid)
     first = not ch.get("initialized")
     known = set(ch["videos"])
+    source = ch.get("source") or "uploads"
     new_ids: list[str] = []
+    owner_check = False
+
+    def try_uploads(pid):
+        return _collect(yt.playlist_pages(pid), known, not first)
+
     try:
-        for page in yt.playlist_pages(uploads_playlist_id(cid)):
-            fresh = [x["video_id"] for x in page if x["video_id"] not in known]
-            new_ids += fresh
-            if not first and not fresh:
-                break
+        if source == "uploads":
+            try:
+                new_ids = try_uploads(uploads_playlist_id(cid))
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                source = "related"
+        if source == "related":
+            pid = ch.get("uploads_id") or yt.uploads_id(cid)
+            try:
+                if not pid or pid == uploads_playlist_id(cid):
+                    raise ApiError(404, "playlistNotFound")
+                new_ids = try_uploads(pid)
+                ch["uploads_id"] = pid
+            except ApiError as e:
+                if e.status != 404:
+                    raise
+                source = "sections"
+        if source == "sections":
+            pls = yt.section_playlists(cid)
+            if pls:
+                owner_check = True
+                for pid in pls:
+                    try:
+                        new_ids += [v for v in _collect(yt.playlist_pages(pid), known | set(new_ids), False)]
+                    except ApiError:
+                        continue
+            else:
+                source = "search"
+        if source == "search":
+            if not allow_search:
+                rep.add("次回以降に取り込むチャンネル（予約枠のため）", f"{cid}（検索で取得するチャンネル）")
+                ch["source"] = "search"
+                catalog.dirty.add(cid)
+                return []
+            after = None if first else (ch.get("last_checked") and f"{ch['last_checked']}T00:00:00Z")
+            new_ids = [v for v in yt.search_channel_video_ids(cid, after) if v not in known]
+            owner_check = True
     except ApiError as e:
         rep.add("警告", f"チャンネル {cid} の動画一覧を取得できません: {e.reason or e.status}")
         return []
+
+    if source != (ch.get("source") or "uploads"):
+        rep.add("動画一覧の取得方法を変更", f"{cid}: {source}（アップロード一覧が見つからないため）")
+    ch["source"] = source
     for v in yt.videos(new_ids):
+        if owner_check and v.get("channel_id") != cid:
+            continue  # アルバム等に入っている、ほかのチャンネルの動画は除く
         catalog.add(cid, v)
     ch["initialized"] = ch.get("initialized") or today
     ch["last_checked"] = today
@@ -196,13 +260,13 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         known = [c for c in roles if (catalog.channels.get(c) or {}).get("initialized")]
         fresh = [c for c in roles if c not in known]
         for cid in known:
-            new_ids += update_channel(yt, catalog, cid, today, rep)
+            new_ids += update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(101))
         deferred = []
         for cid in fresh:
             if not optional_ok(50):
                 deferred.append(roles[cid]["name"] or cid)
                 continue
-            update_channel(yt, catalog, cid, today, rep)
+            update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(150))
         if deferred:
             rep.add("次回以降に取り込むチャンネル（予約枠のため）", "、".join(dict.fromkeys(deferred)))
 
@@ -261,8 +325,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     n_songs = len(cfg.songs())
     misc_pid = resolve(fixed["misc"])
     if not quota_hit and misc_pid:
-        titles = [e.get("title") for e in ledger.present(misc_pid)]
-        for c in rules.promotion_candidates(cfg, titles, idx, roles):
+        for c in rules.promotion_candidates(cfg, ledger.present(misc_pid), idx, roles):
             cfg.append_song({"name": c["name"], "playlist": {"name": c["name"]}, "aliases": c["aliases"],
                              "promoted_at": today, "promoted_versions": c["versions"]})
             rep.add("お気に入りの曲に昇格", f"{c['name']}（{c['versions']} 曲）")
@@ -377,6 +440,17 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             quota_hit = True
             left = sum(1 for pl, v, _ in plan if ledger.status(pids.get(pl.key) or "", v) in ("pending", None))
             rep.add("警告", f"クォータ上限のため {left} 件を次回に持ち越します（台帳では pending）")
+
+    # 8b. お気に入りの曲の確認候補のうち、新曲でないもの（未仕分けには入れず、レポートに出す）
+    for tg in targets:
+        if not tg.pl.key.startswith("song:"):
+            continue
+        pid = pids.get(tg.pl.key)
+        for vid in sorted(tg.cand - set(new_ids), key=pub, reverse=True):
+            if pid and ledger.status(pid, vid) is not None:
+                continue
+            rep.add("お気に入りの曲の確認候補（自動では追加していません。入れるなら include_video_ids へ）",
+                    f"{tg.pl.name} ← {_label(catalog.get(vid), vid)}")
 
     # 9. すでに再生リスト内にある重複（自動では消さず、レポートのみ）
     if cfg.section("dedupe")["enabled"]:

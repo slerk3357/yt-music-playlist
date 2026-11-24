@@ -174,6 +174,28 @@ class YouTube:
                 })
         return out
 
+    def uploads_id(self, channel_id: str) -> str | None:
+        """チャンネル情報に書かれたアップロード一覧のID（UU… と違う場合や、ない場合がある）。"""
+        r = self._exec(self.s.channels().list(part="contentDetails", id=channel_id), "list")
+        items = r.get("items", [])
+        return items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads") if items else None
+
+    def section_playlists(self, channel_id: str) -> list[str]:
+        """チャンネルページの棚（アルバム・シングルなど）に並ぶ再生リストのID。"""
+        r = self._exec(self.s.channelSections().list(part="contentDetails", channelId=channel_id), "list")
+        out = []
+        for it in r.get("items", []):
+            out += it.get("contentDetails", {}).get("playlists", [])
+        return list(dict.fromkeys(out))
+
+    def search_channel_video_ids(self, channel_id: str, published_after: str | None = None) -> list[str]:
+        """チャンネルの動画を検索で取得（新しい順に最大50件、100ユニット）。"""
+        kw = dict(part="id", channelId=channel_id, type="video", maxResults=50, order="date")
+        if published_after:
+            kw["publishedAfter"] = published_after
+        r = self._exec(self.s.search().list(**kw), "search")
+        return [it["id"]["videoId"] for it in r.get("items", [])]
+
     def channels_info(self, ids: list[str]) -> dict[str, dict]:
         """チャンネルID -> {"title", "handle"}。存在しないチャンネルは結果に含まれない。"""
         out = {}

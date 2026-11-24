@@ -196,9 +196,9 @@ occasional:
           V("2", "夜の曲", ch=C("at"), desc="Provided to YouTube by X"),
           V("3", "【cover】夜の曲 / B", ch=C("b"))]
     roles = rules.channel_roles(cfg)
-    assert rules.promotion_candidates(cfg, ["夜の曲 / B"], rules.Index(cfg, vs), roles) == []
+    assert rules.promotion_candidates(cfg, [{"title": "夜の曲 / B"}], rules.Index(cfg, vs), roles) == []
     vs.append(V("4", "夜の曲 (Remix)", ch=C("a")))
-    assert len(rules.promotion_candidates(cfg, ["夜の曲 / B"], rules.Index(cfg, vs), roles)) == 1
+    assert len(rules.promotion_candidates(cfg, [{"title": "夜の曲 / B"}], rules.Index(cfg, vs), roles)) == 1
 
 
 def test_index_scales():
@@ -288,3 +288,77 @@ def test_check_script(tmp_path, capsys):
     broken.write_text('favorites:\n  - name: "B\n', encoding="utf-8")
     assert check.check(broken) == 1
     assert check.check(tmp_path / "none.yaml") == 0
+
+
+SONGS = f"""
+top_favorites:
+  - name: "歌い手A"
+    channels: [{{id: "{C('singer')}", name: "歌い手A"}}]
+occasional:
+  - name: "バンドK"
+    channels: [{{id: "{C('bandk')}", name: "バンドK"}}]
+  - name: "番組F"
+    channels: [{{id: "{C('bangumif')}", name: "番組F"}}]
+  - name: "作曲者H"
+    channels: [{{id: "{C('sakkyokushah')}", name: "作曲者H"}}]
+  - name: "歌手N"
+    channels: [{{id: "{C('kashun')}", name: "歌手N"}}]
+  - name: "バンドP"
+    channels: [{{id: "{C('bandp')}", name: "バンドP"}}]
+songs:
+  - name: "KING"
+  - name: "ダーリン"
+  - name: "アイドル"
+  - name: "テトリス"
+  - name: "プロポーズ"
+    original_artists: ["歌手N"]
+"""
+
+
+def test_song_matching_reported_examples(tmp_path):
+    """曲名の部分一致・アーティスト名への一致・同名の別曲（ご指摘の例）。"""
+    cfg = cfg_of(tmp_path, SONGS)
+    S, K, F, H, N, P = (C(x) for x in ("singer", "bandk", "bangumif", "sakkyokushah", "kashun", "bandp"))
+    vs = [
+        V("k0", "【歌ってみた】KING / 歌い手A", ch=S),
+        V("k1", "KingDom", ch=S),
+        V("k2", "逆夢 - バンドK", ch=K, ch_title="バンドK"),
+        V("k3", "歌手C & 歌手D feat.メンバーK1, メンバーK2 from バンドK - BABY GANGSTA / 番組F / 番組F",
+          ch=F, ch_title="番組F"),
+        V("k4", "Side Quest King (編曲者R remix) feat. 合成音声M", ch=S),
+        V("d0", "【歌ってみた】ダーリン / 歌い手A", ch=S),
+        V("d1", "おねがいダーリン", ch=S), V("d2", "ダーリンゲームオーバーラブ", ch=S), V("d3", "ダーリンダンス", ch=S),
+        V("i0", "アイドル / 歌い手A(cover)", ch=S),
+        V("i1", "アイドルパワー", ch=S), V("i2", "咲き誇れアイドル", ch=S),
+        V("t1", "『「せや！ワイらでテトリス歌ったろ！」Remix by 作曲者H / 作曲者H / Sakkyokusha H』", ch=H, ch_title="作曲者H"),
+        V("p0", "歌手N - プロポーズ", ch=N, ch_title="歌手N"),
+        V("p1", "バンドP「プロポーズ」MV", ch=P, ch_title="バンドP"),
+        V("p2", "【歌ってみた】プロポーズ / 歌い手A", ch=S, desc="原曲: 歌手N"),
+        V("p3", "【歌ってみた】プロポーズ / 歌い手A", ch=S, desc="原曲: バンドP", day="02"),
+    ]
+    t, idx = targets(cfg, vs, {})
+    assert t["KING"].auto == {"k0"}
+    assert t["KING"].cand == {"k4"}                    # 単語として含む → 確認。KingDom・バンドK には一致しない
+    assert t["ダーリン"].auto == {"d0"}
+    assert t["ダーリン"].cand == {"d1", "d2", "d3"}     # 部分一致は自動では入れない
+    assert t["アイドル"].auto == {"i0"} and t["アイドル"].cand == {"i1", "i2"}
+    assert t["テトリス"].auto == set() and t["テトリス"].cand == {"t1"}   # 曲名の中の部分一致 → 確認
+    assert t["プロポーズ"].auto == {"p0", "p2"}        # 歌手N本人・歌手Nが原曲と書かれたカバー
+    assert t["プロポーズ"].cand == {"p1"}              # 同名の別の曲（バンドP）は確認へ
+    # p3（バンドPのカバー）は、同じ歌い手の同名の動画 p2 と重複扱いになり、どちらにも入らない
+    # 重複判定：同じアーティストの別の曲を同じ曲とみなさない
+    assert idx.r["k2"].key[0] == "逆夢"
+    assert rules.dedupe({"p0"}, idx, lambda c: c) == {"p0"}
+
+
+def test_promotion_does_not_promote_artist_names(tmp_path):
+    cfg = cfg_of(tmp_path, SONGS.replace("songs:", "promotion: {min_versions: 2}\nsongs:"))
+    K, F = C("bandk"), C("bangumif")
+    vs = [V("a", "バンドK - 白日", ch=K, ch_title="バンドK"),
+          V("b", "バンドK - 逆夢", ch=K, ch_title="バンドK"),
+          V("c", "バンドK - 白日 / 番組F", ch=F, ch_title="番組F")]
+    idx = rules.Index(cfg, vs)
+    out = rules.promotion_candidates(cfg, [{"video_id": "b", "title": "バンドK - 逆夢"},
+                                           {"video_id": "a", "title": "バンドK - 白日"}], idx, rules.channel_roles(cfg))
+    assert [c["name"] for c in out] == ["白日"]          # アーティスト名（バンドK）は昇格しない
+    assert idx.r["a"].key != idx.r["b"].key              # 別の曲を同じ曲とみなさない
