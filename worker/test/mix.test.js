@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   clampCount, intentUrl, musicUrl, parseWatchRedirect, pickMix, safeEqual, sample, watchVideosUrl,
 } from "../src/mix.js";
-import worker from "../src/index.js";
+import { createHandler } from "../src/index.js";
 
 // 決まった順に値を返す乱数
 function seq(...values) {
@@ -11,7 +11,7 @@ function seq(...values) {
   return () => values[i++ % values.length];
 }
 
-const INDEX = {
+const INDEX_DATA = {
   version: 1,
   generated_at: "2026-11-24T04:00:00+09:00",
   playlists: [
@@ -39,25 +39,25 @@ test("clampCount は 1〜50 に丸める", () => {
 });
 
 test("完全ランダムは全再生リストの動画を重複なく対象にする", () => {
-  const m = pickMix(INDEX, "random", { n: "50" });
+  const m = pickMix(INDEX_DATA, "random", { n: "50" });
   assert.deepEqual(new Set(m.videos), new Set(["a1", "a2", "x", "o1", "s1", "c1", "c2"]));
   assert.equal(m.videos.length, 7);
 });
 
 test("ランダム再生リストは選んだ k 個の再生リストの動画だけ", () => {
-  const m = pickMix(INDEX, "playlists", { k: "1", n: "50" }, seq(0.99));
+  const m = pickMix(INDEX_DATA, "playlists", { k: "1", n: "50" }, seq(0.99));
   assert.equal(m.playlists.length, 1);
-  const chosen = INDEX.playlists.find((p) => p.name === m.playlists[0]);
+  const chosen = INDEX_DATA.playlists.find((p) => p.name === m.playlists[0]);
   assert.deepEqual(new Set(m.videos), new Set(chosen.videos));
   assert.ok(!m.playlists.includes("空"));            // 空の再生リストは選ばない
 });
 
 test("特にお気に入りのミックスは ○○チャンネル＋その他＋特別 の和集合", () => {
-  const m = pickMix(INDEX, "top", { name: "A" });
+  const m = pickMix(INDEX_DATA, "top", { name: "A" });
   assert.deepEqual(new Set(m.videos), new Set(["a1", "a2", "x", "o1", "s1"]));
-  assert.deepEqual(pickMix(INDEX, "top", { name: "0" }).title, "A ミックス");   // 番号でも指定できる
-  assert.equal(pickMix(INDEX, "top", { name: "Z" }).status, 404);
-  assert.equal(pickMix(INDEX, "unknown").status, 404);
+  assert.deepEqual(pickMix(INDEX_DATA, "top", { name: "0" }).title, "A ミックス");   // 番号でも指定できる
+  assert.equal(pickMix(INDEX_DATA, "top", { name: "Z" }).status, 404);
+  assert.equal(pickMix(INDEX_DATA, "unknown").status, 404);
 });
 
 test("URL の組み立てと解析", () => {
@@ -74,16 +74,13 @@ test("URL の組み立てと解析", () => {
   assert.ok(safeEqual("abc", "abc") && !safeEqual("abc", "abd") && !safeEqual("abc", "ab"));
 });
 
-// ---- Worker 全体（fetch と caches を差し替えて確認） ----
+// ---- Worker 全体（fetch を差し替えて確認。索引は組み込み済みのものを渡す） ----
+const worker = createHandler(INDEX_DATA);
+
 function setupWorld({ location = "https://www.youtube.com/watch?v=a1&list=TLGGxyz" } = {}) {
   const calls = [];
-  globalThis.caches = { default: { match: async () => undefined, put: async () => {} } };
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
-    if (String(url).startsWith("https://api.github.com/")) {
-      assert.equal(init.headers.Authorization, "Bearer gh-token");
-      return new Response(JSON.stringify(INDEX), { status: 200 });
-    }
     if (String(url).startsWith("https://www.youtube.com/watch_videos")) {
       assert.equal(init.redirect, "manual");
       return new Response(null, { status: 303, headers: location ? { location } : {} });
@@ -93,7 +90,7 @@ function setupWorld({ location = "https://www.youtube.com/watch?v=a1&list=TLGGxy
   return calls;
 }
 
-const ENV = { GITHUB_TOKEN: "gh-token", GITHUB_REPO: "me/private", CACHE_SECONDS: "0", ALLOWED_EMAILS: "me@gmail.com" };
+const ENV = { ALLOWED_EMAILS: "me@gmail.com" };
 // Cloudflare Access で認証されたときに渡される ctx
 const CTX = { access: { aud: "aud", getIdentity: async () => ({ email: "Me@gmail.com" }) } };
 
@@ -152,4 +149,23 @@ test("メニューに各ミックスへのリンクがある", async () => {
   const html = await res.text();
   assert.match(html, /href="\/random"/);
   assert.match(html, /href="\/top\/A"/);
+});
+
+
+test("ビルド時の組み込みと入口（build.mjs → entry.js）", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const dir = fileURLToPath(new URL("..", import.meta.url));
+  const out = execFileSync(process.execPath, ["build.mjs"], { cwd: dir, encoding: "utf8" });
+  assert.match(out, /索引を組み込みました/);
+  const entry = (await import("../src/entry.js")).default;
+  setupWorld();
+  const res = await entry.fetch(new Request("https://mix.example/"), ENV, CTX);
+  assert.equal(res.status, 200);
+});
+
+test("ALLOWED_EMAILS が空なら Access の認証だけで使える", async () => {
+  setupWorld();
+  const res = await worker.fetch(new Request("https://mix.example/random"), {}, CTX);
+  assert.equal(res.status, 302);
 });

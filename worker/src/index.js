@@ -15,44 +15,13 @@
 //   app=intent     Android でブラウザが開いてしまう場合に、intent:// でアプリを指定する
 //   format=json    リダイレクトせず、選曲結果と URL を JSON で返す
 //
-// YouTube Data API は使わない（クォータ消費 0）。曲の一覧は非公開リポジトリの
-// data/mix/index.json（毎日の同期で更新）を GitHub API で読み、キャッシュする。
+// YouTube Data API は使わない（クォータ消費 0）。曲の一覧は、ビルド時（build.mjs）に
+// 非公開リポジトリの data/mix/index.json を Worker に組み込んだもの。毎日の同期で索引が
+// 更新されると、Cloudflare が自動でビルドし直す（ビルドの監視パスに data/mix/index.json を入れる）。
 
 import {
   escapeHtml, intentUrl, musicUrl, parseWatchRedirect, pickMix, safeEqual, watchVideosUrl,
 } from "./mix.js";
-
-let memo = null; // { at, index }  同じ isolate の中だけの簡易キャッシュ
-
-async function loadIndex(env, ctx) {
-  const ttl = Number(env.CACHE_SECONDS || 600);
-  if (memo && Date.now() - memo.at < ttl * 1000) return memo.index;
-  const repo = env.GITHUB_REPO;
-  const path = env.INDEX_PATH || "data/mix/index.json";
-  const branch = env.GITHUB_BRANCH || "main";
-  const api = `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`;
-
-  const cache = caches.default;
-  const cacheKey = new Request(`https://mix-index.cache/${repo}/${branch}/${path}`);
-  let res = await cache.match(cacheKey);
-  if (!res) {
-    const gh = await fetch(api, {
-      headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-        Accept: "application/vnd.github.raw+json",
-        "User-Agent": "yt-music-playlist-mix",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!gh.ok) throw new Error(`索引を取得できません（GitHub ${gh.status}）`);
-    const body = await gh.text();
-    res = new Response(body, { headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${ttl}` } });
-    ctx?.waitUntil?.(cache.put(cacheKey, res.clone()));
-  }
-  const index = await res.json();
-  memo = { at: Date.now(), index };
-  return index;
-}
 
 /** watch_videos で一時リスト（TLGG…）を作り、v と list を返す。失敗したら null。 */
 async function resolveTemporaryList(videoIds) {
@@ -109,8 +78,13 @@ export async function authorize(env, ctx) {
   return allowed.includes(email) ? null : "このアカウントでは利用できません";
 }
 
-export default {
-  async fetch(request, env, ctx) {
+/** 索引を受け取ってハンドラを作る（テストでは別の索引を渡す）。 */
+export function createHandler(index) {
+  return { fetch: (request, env, ctx) => handle(request, env, ctx, index) };
+}
+
+async function handle(request, env, ctx, index) {
+  {
     const denied = await authorize(env, ctx);
     if (denied) return new Response(denied, { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
@@ -122,12 +96,6 @@ export default {
       if (!safeEqual(parts[0] ?? "", env.ACCESS_KEY)) return new Response("Not Found", { status: 404 });
       base = `/${encodeURIComponent(parts[0])}`;
       parts = parts.slice(1);
-    }
-    let index;
-    try {
-      index = await loadIndex(env, ctx);
-    } catch (e) {
-      return new Response(String(e.message || e), { status: 502 });
     }
     if (parts.length === 0) {
       return new Response(menu(index, base), {
@@ -149,8 +117,8 @@ export default {
       return json({ ...mix, temporary_list: temp?.list ?? null, music_url: music, open_url: target });
     }
     return new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } });
-  },
-};
+  }
+}
 
 function format(q) {
   return q.format === "json" ? "json" : "redirect";

@@ -287,7 +287,7 @@ python -m ytpl.pull_config --channel-names  # {id, name} で書いたチャン�
 | `data/playlists/*.yaml` | 各再生リストの中身の台帳（バックアップ） |
 | `data/catalog/*.yaml` | 監視チャンネルの動画情報 |
 | `data/state.yaml` | @ハンドルのキャッシュ、最終実行日時など |
-| `data/mix/index.json` | オリジナルミックスリスト用の索引（管理対象の再生リストの曲。「未仕分け」と `ignore_playlists` は除く）。Cloudflare Worker が読む |
+| `data/mix/index.json` | オリジナルミックスリスト用の索引（管理対象の再生リストの曲。「未仕分け」と `ignore_playlists` は除く）。Cloudflare Worker がビルド時に組み込む |
 | `reports/latest.md` | 最新の実行レポート |
 | `reports/latest-create.md` | `config.yaml` の push で行った、作成だけの実行のレポート |
 
