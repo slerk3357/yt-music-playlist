@@ -14,6 +14,7 @@ YouTubeの音楽再生リストを独自ルールで毎日自動仕分けし、�
 | 仮保存 | 判断が必要な新着曲を「未仕分け」に追加 |
 | 昇格 | 「その他の曲」のうち本家/カバーが5曲以上ある曲を「お気に入りの曲」にし、曲名の再生リストを作成 |
 | レポート | `reports/latest.md` と Actions の実行サマリーに結果を出力 |
+| ミックス用の索引 | オリジナルミックスリスト用に、管理対象の再生リストの曲を `data/mix/index.json` に書き出す |
 
 **クォータ（1日10,000）が足りないときの優先順位**
 - 読み取り：管理対象の再生リストのバックアップと、取り込み済みチャンネルの新着取得は毎日必ず行います。管理外の再生リストのバックアップ、新しく追加したチャンネルの全件取得、検索は、書き込み用の予約枠（`quota.write_reserve`）を残せる範囲で行い、残りは次回に回します。
@@ -119,6 +120,48 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 - 管理したくない再生リストは `ignore_playlists` に `{id, name}` で列挙します。
 - YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、手元で `python -m ytpl.pull_config` を実行します。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
+
+## オリジナルミックスリスト
+
+このシステムで管理している再生リストの曲だけから、その場でミックスを作り、YouTube Music で再生します。YouTube の「一時的な再生リスト」（`watch_videos`）を使うので、**YouTube Data API のクォータは消費しません**。
+
+| ミックス | URL | 選曲の対象 |
+|---|---|---|
+| メニュー | `/<合言葉>/` | 下の各ミックスへのリンク（スマホのホーム画面に置く用） |
+| 完全ランダム | `/<合言葉>/random` | 管理しているすべての再生リストの曲 |
+| ランダム再生リスト | `/<合言葉>/playlists?k=3` | ランダムに選んだ k 個の再生リストの曲 |
+| 特にお気に入りのチャンネル | `/<合言葉>/top/<name>` | その人の ○○チャンネル＋その他○○＋特別再生リストの曲 |
+
+- **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」と `ignore_playlists` は含めません。削除・非公開になった曲も除きます。
+- **共通のオプション:** `n=50`（曲数。1〜50、既定は50）、`open=list`（曲一覧の画面を開く）、`app=intent`（Android でブラウザが開いてしまうとき）、`format=json`（リダイレクトせず選曲結果を表示）。
+- **選び直し:** リンクを開くたびに選び直します。同じ曲は1回だけです。
+
+**しくみ**
+1. 毎日の同期が、ミックス用の索引 `data/mix/index.json` を非公開リポジトリに書き出します。
+2. Cloudflare Worker（`worker/`）が、読み取り専用トークンでその索引を読みます（10分キャッシュ）。
+3. 選んだ曲で `watch_videos` を呼んで一時リスト（`TLGG…`）を作り、`music.youtube.com` へ HTTP 302 でリダイレクトします。Android ならそのまま YouTube Music アプリが開きます。
+
+**セットアップ**
+1. **GitHub のトークン:** Settings → Developer settings → Fine-grained tokens で作成します。Repository access は**非公開リポジトリだけ**、Permissions は **Contents: Read-only** だけにします。
+2. **Cloudflare:** アカウントを作り、手元で次を実行します。
+   ```bash
+   cd worker
+   npm install
+   npx wrangler login
+   npx wrangler secret put GITHUB_REPO    # 例: your-name/your-private-repo
+   npx wrangler secret put GITHUB_TOKEN   # 1 のトークン
+   npx wrangler secret put ACCESS_KEY     # 合言葉。例: openssl rand -hex 24 で作った文字列
+   npx wrangler deploy
+   ```
+3. 表示された `https://yt-music-mix.<あなたのサブドメイン>.workers.dev/<合言葉>/` をスマホで開き、ホーム画面に追加します。
+
+**注意**
+- **合言葉:** URL を知っている人は、誰でもミックスを作れます（再生リストの曲が分かります）。URL は人に教えないでください。漏れたら `ACCESS_KEY` を変えて、もう一度 deploy します。
+- **iPhone:** 別ドメインからのリダイレクトではアプリが開かず、Safari で Web 版の YouTube Music が開きやすくなります（画面上部のバナーからアプリに切り替えられます）。
+- **一時リスト:** 時間がたつと使えなくなるので、保存用ではなく「今聴く」用です。残したいときは、YouTube Music の再生画面の「保存」から再生リストに保存できます。
+- **非公式の仕組み:** `watch_videos` は YouTube の公式APIではないので、仕様が変わると動かなくなる可能性があります。一時リストを作れなかったときは、`watch_videos` の URL を直接開きます（YouTube のアプリかブラウザで再生されます）。
+- **再生できない曲:** YouTube Music で再生できない動画は、リストの中でグレー表示になるか、飛ばされます。
+- **テスト:** `cd worker && npm test`
 
 ## バックアップと復元
 `data/playlists/*.yaml` の各曲には `status` が付きます。

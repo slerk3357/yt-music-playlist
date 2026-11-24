@@ -140,6 +140,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             catalog.save()
             ledger.save()
             cfg.save()
+            if not create_only:
+                from . import mix_index
+                mix_index.write(data / "mix" / "index.json", mix_index.build(cfg, ledger, now.isoformat(timespec="seconds")))
             dump_yaml(state_path, state)
             rp = Path(report_path)
             if create_only:   # 作成だけの実行は、毎日のレポートを上書きしない

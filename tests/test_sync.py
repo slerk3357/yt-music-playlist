@@ -403,3 +403,21 @@ def test_pull_config(tmp_path):
     assert '{id: "' + A + '", name: "Alice Official"}' in text
     assert 'name: "アリス"\n' in text                    # それでも3分類の name は変えない
     assert before != text
+
+
+def test_mix_index(tmp_path):
+    import json
+    cfg = CONFIG.replace("promotion:", 'ignore_playlists:\n  - {id: "PLprivate", name: "個人用"}\npromotion:')
+    yt = setup(tmp_path, cfg)
+    yt.pl["PLprivate"] = {"title": "個人用", "items": ["a1"]}
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    yt.v["d3"] = V("d3", "知らない曲 / デイブ", D, "02-02")
+    run(yt=yt, now=day(2, 10), **kw(tmp_path))                     # d3 は未仕分けへ
+    idx = json.loads((tmp_path / "data/mix/index.json").read_text(encoding="utf-8"))
+    by_name = {p["name"]: p for p in idx["playlists"]}
+    assert "未仕分け" not in by_name and "個人用" not in by_name
+    assert by_name["アリスチャンネル"]["videos"] == ["a1", "a2"] and by_name["アリスチャンネル"]["kind"] == "channel"
+    assert by_name["その他の曲"]["kind"] == "misc"
+    assert all("d3" not in p["videos"] for p in idx["playlists"])
+    top = idx["top_favorites"][0]
+    assert top["name"] == "アリス" and top["playlists"] == ["PLalice", "PLaliceOther"]

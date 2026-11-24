@@ -1,0 +1,15 @@
+# オリジナルミックスリスト API（Cloudflare Worker）
+# デプロイ手順は README.md の「オリジナルミックスリスト」を参照。
+name = "yt-music-mix"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+GITHUB_BRANCH = "main"
+INDEX_PATH = "data/mix/index.json"
+CACHE_SECONDS = "600"   # 索引をキャッシュする秒数
+
+# 次の値は、このファイルには書かずに wrangler secret put で登録する
+#   GITHUB_REPO  : 索引を置いている非公開リポジトリ（例: your-name/your-private-repo）
+#   GITHUB_TOKEN : その非公開リポジトリの Contents を読むだけの fine-grained トークン
+#   ACCESS_KEY   : URL に含める合言葉（長いランダムな文字列）
