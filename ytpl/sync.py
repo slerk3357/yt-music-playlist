@@ -188,6 +188,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     alive: dict[str, str] = {}   # 再生リストID -> 実際のタイトル
     playlists: list[dict] = []
     unsorted_add: set[str] = set()
+    suggestions: dict[str, list[str]] = {}
 
     def resolve(pl: rules.PL) -> str | None:
         """再生リストIDを決める（名前では探さない）。"""
@@ -213,6 +214,16 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                 rp = rp.with_name(rp.stem + "-create" + rp.suffix)
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(text, encoding="utf-8")
+            if not create_only:
+                sp = rp.with_name("suggestions.md")
+                body = [f"# 追加の提案 {now:%Y-%m-%d %H:%M} JST", "",
+                        "すでに別の再生リストに入っている曲や、お気に入りの曲の確認候補のうち、"
+                        "まだ入れていない（消してもいない）ものです。自動では追加しません。", ""]
+                for name, lines in sorted(suggestions.items()):
+                    body += [f"## {name}（{len(lines)}）"] + [f"- {x}" for x in lines] + [""]
+                if not suggestions:
+                    body.append("提案はありません。")
+                sp.write_text("\n".join(body) + "\n", encoding="utf-8")
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write(text + "\n")
@@ -223,6 +234,10 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         playlists = yt.my_playlists()
         alive.update({p["id"]: p["title"] for p in playlists})
         create_missing_playlists(cfg, yt, playlists, alive, ledger, rep, dry_run)
+        # config.yaml のどこにも載っていない再生リストは、管理外として ignore_playlists に記録する
+        from .pull_config import add_unknown_to_ignore
+        for p in add_unknown_to_ignore(cfg, playlists):
+            rep.add("管理外として ignore_playlists に追加（要確認）", f"{p['title']}: {p['id']}")
     except QuotaExceeded as e:
         rep.add("警告", f"再生リストの作成中にクォータ上限に達しました: {e}")
         return finish("再生リストの作成", 0)
@@ -238,15 +253,10 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         return yt.remaining - cost >= reserve
 
     try:
-        # 1. 再生リストの中身をスナップショット（＝バックアップ）。管理対象を先に、管理外は予約枠の範囲で
-        skipped = []
-        for p in sorted((p for p in playlists if p["id"] not in ignored), key=lambda p: p["id"] not in managed_ids):
-            if p["id"] not in managed_ids and not optional_ok():
-                skipped.append(p["title"])
-                continue
-            ledger.apply_snapshot(p["id"], p["title"], yt.playlist_items(p["id"]), today)
-        if skipped:
-            rep.add("今回バックアップしなかった再生リスト（予約枠のため）", "、".join(skipped))
+        # 1. 管理対象の再生リストの中身をスナップショット（＝バックアップ）。管理外（ignore_playlists）はしない
+        for p in playlists:
+            if p["id"] in managed_ids and p["id"] not in ignored:
+                ledger.apply_snapshot(p["id"], p["title"], yt.playlist_items(p["id"]), today)
         for t in ledger.mark_deleted_playlists(set(alive), today):
             rep.add("警告", f"再生リスト「{t}」がYouTube上から消えています（台帳は保持）")
         for doc in ledger.docs.values():
@@ -441,16 +451,29 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             left = sum(1 for pl, v, _ in plan if ledger.status(pids.get(pl.key) or "", v) in ("pending", None))
             rep.add("警告", f"クォータ上限のため {left} 件を次回に持ち越します（台帳では pending）")
 
-    # 8b. お気に入りの曲の確認候補のうち、新曲でないもの（未仕分けには入れず、レポートに出す）
+    # 8b. ほかの再生リストへの追加の提案（自動では追加しない。reports/suggestions.md と レポートに出す）
+    #   すでにどれかの管理対象の再生リストに入っている曲が、別の再生リストの確認候補に当たっているもの。
+    #   お気に入りの曲は、どこにも入っていない過去の確認候補も出す。入っていた（自分で消した）曲は出さない
+    present_in: dict[str, list[str]] = {}
+    for k, pid in pids.items():
+        if pid and k != "unsorted":
+            for e in ledger.present(pid):
+                present_in.setdefault(e["video_id"], []).append(alive.get(pid) or pid)
+    suggestions: dict[str, list[str]] = {}
+    fresh = set(new_ids)
     for tg in targets:
-        if not tg.pl.key.startswith("song:"):
-            continue
         pid = pids.get(tg.pl.key)
-        for vid in sorted(tg.cand - set(new_ids), key=pub, reverse=True):
+        for vid in sorted(tg.cand - fresh, key=pub, reverse=True):
             if pid and ledger.status(pid, vid) is not None:
                 continue
-            rep.add("お気に入りの曲の確認候補（自動では追加していません。入れるなら include_video_ids へ）",
-                    f"{tg.pl.name} ← {_label(catalog.get(vid), vid)}")
+            where = [n for n in present_in.get(vid, []) if n != tg.pl.name]
+            if not where and not tg.pl.key.startswith("song:"):
+                continue
+            note = f"理由: {tg.why.get(vid, '確認候補')}" + (f" / 今入っている: {'、'.join(where)}" if where else "")
+            suggestions.setdefault(tg.pl.name, []).append(f"{_label(catalog.get(vid), vid)} — {note}")
+    for name, lines in suggestions.items():
+        for line in lines:
+            rep.add("ほかの再生リストへの追加の提案（入れるなら手で追加するか include_video_ids へ）", f"{name} ← {line}")
 
     # 9. すでに再生リスト内にある重複（自動では消さず、レポートのみ）
     if cfg.section("dedupe")["enabled"]:

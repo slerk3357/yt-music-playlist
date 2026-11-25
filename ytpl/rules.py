@@ -532,6 +532,7 @@ class Target:
     auto: set = field(default_factory=set)     # 自動で追加する動画
     cand: set = field(default_factory=set)     # 「未仕分け」に仮保存して人が判断する候補
     inc: set = field(default_factory=set)      # include_video_ids（手動の指定）
+    why: dict = field(default_factory=dict)    # 候補（cand）になった理由
 
 
 def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
@@ -554,7 +555,8 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
                 and (entity_of(idx.r[vid].ch), idx.r[vid].key) not in has_vocal
                 and (entity_of(idx.r[vid].ch), idx.r[vid].key) not in extra_vocal}
 
-    def emit(pl: PL, verified: set, unverified: set, rule: dict, entity_of=None, extra_vocal=frozenset()):
+    def emit(pl: PL, verified: set, unverified: set, rule: dict, entity_of=None, extra_vocal=frozenset(),
+             why: dict | None = None, reason: str = "判断が必要な再生リスト"):
         """verified は pl.auto に従って自動/候補へ。unverified（名前一致のみ）は常に候補へ。"""
         inc = set(rule.get("include_video_ids") or [])
         exc = set(rule.get("exclude_video_ids") or [])
@@ -565,7 +567,10 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         if do_dedupe:
             kept = dedupe(auto | cand, idx, entity_of or ent_of())
             auto, cand = auto & kept, cand & kept
-        out.append(Target(pl, auto | inc, cand - inc, inc))
+        cand -= inc
+        reasons = {v: (why or {}).get(v) or ("名前（aliases / mention_aliases）だけの一致" if v in unverified else reason)
+                   for v in cand}
+        out.append(Target(pl, auto | inc, cand, inc, reasons))
 
     for key, tier, i, e in tier_entries(cfg):
         own_ids = ids(e.get("channels"))
@@ -631,7 +636,8 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             if other.get("exclude_keywords"):
                 rest -= idx.title_has(other["exclude_keywords"], rest)
             pl = _pl(op, f"other:{key}:{i}", False, (key, i, "other", "playlist"), creatable=False)
-            emit(pl, rest, set(), other)
+            emit(pl, rest, set(), other, why={v: "名前（aliases）だけの一致" for v in by_name},
+                 reason="「その他○○」の関係曲（常に確認）")
 
     # お気に入りの曲：公式＋登録チャンネルのカバー
     #   完全一致（曲名の候補が曲名と同じ）で、原曲の手がかりがある → 自動
@@ -665,8 +671,10 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         off_ent = {c: "official:" + s["name"] for c in official if c not in ents}
         extra = frozenset((off_ent[c], idx.r[v].key) for c in off_ent for v in idx.by_ch.get(c, ())
                           if not idx.r[v].off)
+        why = {v: "曲名の部分一致" for v in partial}
+        why.update({v: "原曲の手がかりなし" for v in cand - partial})
         emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), auto, cand, s,
-             entity_of=ent_of(off_ent), extra_vocal=extra)
+             entity_of=ent_of(off_ent), extra_vocal=extra, why=why)
     return out
 
 

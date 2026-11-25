@@ -71,6 +71,35 @@ def _channel_nodes(doc):
                 yield f"songs「{s.get('name')}」.official_channels", r
 
 
+def referenced_playlist_ids(cfg: Config) -> set[str]:
+    """config.yaml のどこかに（ignore_playlists も含めて）id が書かれている再生リスト。"""
+    return {n.get("id") for _, n in _playlist_nodes(cfg.doc) if n.get("id")}
+
+
+def add_unknown_to_ignore(cfg: Config, playlists: list[dict]) -> list[dict]:
+    """config.yaml のどこにも載っていない再生リストを、ignore_playlists に「# 要確認」付きで追加する。
+
+    追加した再生リストを返す（保存はしない）。毎日の実行と pull_config の両方から使う。
+    """
+    known = referenced_playlist_ids(cfg)
+    new = sorted((p for p in playlists if p["id"] not in known), key=lambda p: p["title"])
+    if not new:
+        return []
+    seq = cfg.doc.get("ignore_playlists")
+    if not isinstance(seq, CommentedSeq):
+        seq = CommentedSeq()
+        cfg.doc["ignore_playlists"] = seq
+    for p in new:
+        m = CommentedMap([("id", dq(p["id"])), ("name", dq(p["title"]))])
+        m.fa.set_flow_style()
+        seq.append(m)
+        seq.yaml_add_eol_comment("要確認", len(seq) - 1, column=0)   # 「 # 要確認」で統一
+    from .store import _plain_tree
+    cfg.raw = _plain_tree(cfg.doc)
+    cfg.dirty = True
+    return new
+
+
 def pull(cfg: Config, yt: YouTube, channel_names: bool = False) -> list[str]:
     """cfg.doc を書き換え、変更・警告の一覧を返す（保存はしない）。"""
     log: list[str] = []
@@ -91,18 +120,8 @@ def pull(cfg: Config, yt: YouTube, channel_names: bool = False) -> list[str]:
             node["name"] = dq(title[pid])
 
     # 3. 未登録の再生リスト → ignore_playlists（要確認）
-    new = sorted((p for p in playlists if p["id"] not in referenced), key=lambda p: p["title"])
-    if new:
-        seq = cfg.doc.get("ignore_playlists")
-        if not isinstance(seq, CommentedSeq):
-            seq = CommentedSeq()
-            cfg.doc["ignore_playlists"] = seq
-        for p in new:
-            m = CommentedMap([("id", dq(p["id"])), ("name", dq(p["title"]))])
-            m.fa.set_flow_style()
-            seq.append(m)
-            seq.yaml_add_eol_comment("要確認", len(seq) - 1, column=0)   # 「 # 要確認」で統一
-            log.append(f"＋ ignore_playlists に追加（要確認）:「{p['title']}」{p['id']}")
+    for p in add_unknown_to_ignore(cfg, playlists):
+        log.append(f"＋ ignore_playlists に追加（要確認）:「{p['title']}」{p['id']}")
 
     # 2・4. チャンネル
     nodes = list(_channel_nodes(cfg.doc))

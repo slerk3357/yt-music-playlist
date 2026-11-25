@@ -363,7 +363,7 @@ def test_new_songs_before_backlog(tmp_path):
     assert titles(yt)["朝の曲"] == ["c3"]
 
 
-def test_reserve_defers_new_channel_and_optional_backup(tmp_path):
+def test_reserve_defers_new_channel_and_unknown_playlists(tmp_path):
     yt = setup(tmp_path)
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     yt.pl["PLother"] = {"title": "管理外の再生リスト", "items": ["a1"]}
@@ -374,10 +374,14 @@ def test_reserve_defers_new_channel_and_optional_backup(tmp_path):
     yt.used, yt.budget = 0, 2000 + 9           # 一覧1＋管理対象8件のバックアップ分だけ予約枠の外
     text = run(yt=yt, now=day(2, 10), **kw(tmp_path))
     assert "次回以降に取り込むチャンネル" in text and "エド" in text
-    assert "今回バックアップしなかった再生リスト" in text and "管理外の再生リスト" in text
+    # 未知の再生リストは ignore_playlists に記録され、バックアップの対象にしない
+    assert "管理外として ignore_playlists に追加" in text and "管理外の再生リスト" in text
+    cfg_text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert '- {id: "PLother", name: "管理外の再生リスト"} # 要確認' in cfg_text
     yt.used, yt.budget = 0, 10000
-    run(yt=yt, now=day(2, 11), **kw(tmp_path))
-    assert (tmp_path / "data/playlists/管理外の再生リスト.yaml").exists()
+    text = run(yt=yt, now=day(2, 11), **kw(tmp_path))
+    assert not (tmp_path / "data/playlists/管理外の再生リスト.yaml").exists()
+    assert "管理外として ignore_playlists に追加" not in text      # 2回目は追加しない
     assert "e1" in {v for ch in __import__("ytpl.store", fromlist=["x"]).Catalog(tmp_path / "data/catalog").channels.values()
                     for v in ch["videos"]}
 
@@ -479,3 +483,24 @@ def test_topic_channel_fallbacks(tmp_path):
     yt.albums[AT2]["OLAKalbum2"] = ["t2"]
     run(yt=yt, now=day(2, 10), **kw(tmp_path))
     assert "t2" in titles(yt)["アリスチャンネル"]
+
+
+def test_suggestions_for_other_playlists(tmp_path):
+    """すでに別の再生リストに入っている曲が、ほかの再生リストの確認候補に当たっていれば提案する。"""
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    # c3（名前「Alice」だけで一致＝その他アリスの確認候補）を、ユーザーが「その他の曲」に入れた
+    yt.pl["PLmisc"]["items"].append("c3")
+    # b1（ボブの曲＝ボブチャンネルの確認候補）は、すでに「夜の曲」に入っている
+    run(yt=yt, now=day(1, 11), **kw(tmp_path))
+    sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    assert "## その他アリス" in sug and "朝の曲 / キャロル" in sug and "名前（aliases）だけの一致" in sug
+    assert "今入っている: その他の曲" in sug
+    assert "## ボブチャンネル" in sug and "【cover】夜の曲 / ボブ" in sug and "今入っている: 夜の曲" in sug
+    # 提案した曲を自分で入れて、また消した場合は、もう提案しない
+    yt.pl["PLaliceOther"]["items"].append("c3")
+    run(yt=yt, now=day(1, 12), **kw(tmp_path))
+    yt.pl["PLaliceOther"]["items"].remove("c3")
+    run(yt=yt, now=day(1, 13), **kw(tmp_path))
+    sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    assert "朝の曲 / キャロル" not in sug.split("## その他アリス")[-1].split("##")[0] if "## その他アリス" in sug else True
