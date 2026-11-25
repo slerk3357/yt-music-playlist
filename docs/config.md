@@ -289,15 +289,11 @@ python -m ytpl.check other.yaml # ほかのファイルを確認
 - **ドライラン：** ドライランでは何も書き込みません。
 - **手で編集していた場合：** 実行中に手で編集・pushしていても、ワークフローは最新の変更を取り込んでから push します。同じ行を両方で変えた場合だけ、push が失敗します。
 
-### 手元で YouTube の状態を反映する（pull_config）
+### YouTube の状態を反映する（pull_config）
 
-YouTube上の今の状態を、手元の `config.yaml` に反映するコマンドです。読み取りだけで、APIの使用量は数ユニットです。
-
-```bash
-python -m ytpl.pull_config                  # 変更内容を表示し、config.yaml を更新
-python -m ytpl.pull_config --dry-run        # 表示だけ
-python -m ytpl.pull_config --channel-names  # {id, name} で書いたチャンネルの name も更新
-```
+YouTube上の今の状態を `config.yaml` に反映するコマンドです。読み取りだけで、APIの使用量は数ユニットです。
+Actions →「playlist-tools」→「Run workflow」で、command に `pull_config`（チャンネルの name も更新するなら `pull_config --channel-names`）を選んで実行します。dry_run のままなら変更内容の表示だけ、外すと `config.yaml` を更新してコミットします。
+（自前の OAuth クライアントの方式なら、手元でも `python -m ytpl.pull_config [--dry-run] [--channel-names]` で実行できます。）
 
 | 内容 | config.yaml への反映 |
 |---|---|

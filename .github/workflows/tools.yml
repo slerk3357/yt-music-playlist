@@ -1,0 +1,93 @@
+name: playlist-tools
+
+# YouTube を読み書きする補助コマンドを、手動で実行する（Actions → playlist-tools → Run workflow）。
+# Apps Script の認証は GitHub Actions の OIDC トークンで行うため、これらは手元では動かせない。
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "実行するコマンド"
+        type: choice
+        options:
+          - "draft_config（今の再生リストから config.draft.yaml を作る）"
+          - "pull_config（再生リスト名の更新と、未登録の再生リストを ignore_playlists へ）"
+          - "pull_config --channel-names（チャンネルの name も更新）"
+          - "restore（バックアップから消えた曲を戻す）"
+      playlist:
+        description: "restore：台帳の再生リスト名"
+        type: string
+        default: ""
+      to_new:
+        description: "restore：この名前で新しい再生リストを作って復元（空なら元の再生リストに戻す）"
+        type: string
+        default: ""
+      dry_run:
+        description: "書き込みせず内容だけ表示（draft_config は常に書き込みなし）"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: playlist-sync   # 毎日の同期と同時に動かさない
+  cancel-in-progress: false
+
+jobs:
+  tool:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # config.yaml・台帳・下書きを push する
+      id-token: write   # GitHub の OIDC トークンで Apps Script からトークンを受け取る
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r requirements.txt
+      - name: Run
+        env:
+          YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          COMMAND: ${{ inputs.command }}
+          PLAYLIST: ${{ inputs.playlist }}
+          TO_NEW: ${{ inputs.to_new }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          dry=()
+          if [ "$DRY_RUN" = "true" ]; then dry=(--dry-run); fi
+          case "$COMMAND" in
+            "draft_config"*)
+              python -m ytpl.draft_config > config.draft.yaml
+              { echo '### config.draft.yaml'; echo '```yaml'; cat config.draft.yaml; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            "pull_config --channel-names"*)
+              python -m ytpl.pull_config --channel-names "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            "pull_config"*)
+              python -m ytpl.pull_config "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            "restore"*)
+              if [ -z "$PLAYLIST" ]; then echo "::error::playlist を指定してください"; exit 1; fi
+              args=(--playlist "$PLAYLIST")
+              if [ -n "$TO_NEW" ]; then args+=(--to-new "$TO_NEW"); fi
+              python -m ytpl.restore "${args[@]}" "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            *) echo "::error::不明なコマンド: $COMMAND"; exit 1 ;;
+          esac
+      - name: Commit
+        if: ${{ !inputs.dry_run || startsWith(inputs.command, 'draft_config') }}
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for p in config.yaml config.draft.yaml data; do if [ -e "$p" ]; then git add -A "$p"; fi; done
+          git diff --cached --quiet || git commit -m "tools: ${COMMAND%%（*} $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          git pull --rebase --autostash origin main
+          git push

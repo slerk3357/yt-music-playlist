@@ -32,12 +32,36 @@ def parse_duration(iso: str | None) -> int | None:
     return d * 86400 + h * 3600 + mi * 60 + s
 
 
-def fetch_gas_token(url: str, secret: str) -> str:
-    """Apps Script のWebアプリからアクセストークンを受け取る（約1時間有効）。"""
+OIDC_AUDIENCE = "yt-music-playlist"
+
+
+def github_oidc_token(audience: str) -> str:
+    """GitHub Actions の OIDC トークン（その実行専用・数分で失効）を受け取る。
+
+    ワークフローに permissions: id-token: write が必要。GitHub Actions の外では使えない。
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+    bearer = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not url or not bearer:
+        raise RuntimeError("GitHub の OIDC トークンを取得できません。Apps Script の方式は GitHub Actions の中でだけ使えます"
+                           "（ワークフローに permissions: id-token: write が必要です。手元では動かせません）")
+    sep = "&" if "?" in url else "?"
+    req = urllib.request.Request(f"{url}{sep}audience={urllib.parse.quote(audience)}",
+                                 headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))["value"]
+
+
+def fetch_gas_token(url: str, id_token: str) -> str:
+    """Apps Script のWebアプリに GitHub の OIDC トークンを送り、YouTube のアクセストークン（約1時間有効）を受け取る。"""
     import json
     import urllib.request
 
-    req = urllib.request.Request(url, data=json.dumps({"secret": secret}).encode(),
+    req = urllib.request.Request(url, data=json.dumps({"id_token": id_token}).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=60) as r:  # 302 リダイレクトは自動で追従
         text = r.read().decode("utf-8", "replace")
@@ -47,7 +71,8 @@ def fetch_gas_token(url: str, secret: str) -> str:
         raise RuntimeError("トークン発行Webアプリの応答がJSONではありません。"
                            "デプロイのアクセス権が「全員」になっているか確認してください") from None
     if "access_token" not in data:
-        raise RuntimeError(f"トークンを取得できません: {data.get('error')}（YT_TOKEN_SECRET を確認）")
+        raise RuntimeError(f"トークンを取得できません: {data.get('error')}"
+                           "（Apps Script のスクリプト プロパティ ALLOWED_REPOSITORY と、Code.gs が最新かを確認）")
     return data["access_token"]
 
 
@@ -65,14 +90,15 @@ class YouTube:
     def from_env(cls, budget: int) -> "YouTube":
         """認証情報を環境変数から読む。
 
-        - YT_TOKEN_URL + YT_TOKEN_SECRET: Apps Script のトークン発行Webアプリ（推奨）
+        - YT_TOKEN_URL: Apps Script のトークン発行Webアプリ（推奨）。GitHub Actions の OIDC トークンで認証する
         - YT_CLIENT_ID + YT_CLIENT_SECRET + YT_REFRESH_TOKEN: 自前の OAuth クライアント
         """
         from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
         if os.environ.get("YT_TOKEN_URL"):
-            creds = Credentials(fetch_gas_token(os.environ["YT_TOKEN_URL"], os.environ["YT_TOKEN_SECRET"]))
+            aud = os.environ.get("YT_TOKEN_AUDIENCE") or OIDC_AUDIENCE
+            creds = Credentials(fetch_gas_token(os.environ["YT_TOKEN_URL"], github_oidc_token(aud)))
         else:
             creds = Credentials(
                 None,

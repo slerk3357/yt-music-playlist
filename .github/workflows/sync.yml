@@ -28,6 +28,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write   # バックアップと config.yaml の更新を push する
+      id-token: write   # GitHub の OIDC トークンを受け取り、Apps Script に送る（保存しておく秘密は使わない）
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -54,7 +55,6 @@ jobs:
         if: steps.check.outputs.ok == 'true'
         env:
           YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
-          YT_TOKEN_SECRET: ${{ secrets.YT_TOKEN_SECRET }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}

@@ -66,36 +66,42 @@ git pull upstream main
 ```
 
 ### 2. トークン発行用の Apps Script（初回のみ）
-Google Cloud の OAuth 設定の代わりに、Google Apps Script で「YouTube 用のアクセストークンを返すだけのWebアプリ」を作ります。GitHub Actions は実行のたびにここからトークンを受け取ります。
+Google Cloud の OAuth 設定の代わりに、Google Apps Script で「YouTube 用のアクセストークンを返すだけのWebアプリ」を作ります。GitHub Actions は実行のたびに、GitHub が発行する **OIDC トークン**（その実行専用・数分で失効）を送ってここからトークンを受け取ります。Apps Script は GitHub の公開鍵で署名を確かめ、**指定したリポジトリの main ブランチの、同期と補助コマンドのワークフロー**から来たときだけトークンを返します。合言葉のような保存しておく秘密はありません。
 
 1. [Apps Script](https://script.google.com/) で「新しいプロジェクト」を作成（**再生リストを持っているGoogleアカウント**で）
 2. 左の「プロジェクトの設定」→「「appsscript.json」マニフェスト ファイルをエディタで表示する」にチェック
 3. エディタで `appsscript.json` と `コード.gs` の中身を、このリポジトリの [`gas/appsscript.json`](gas/appsscript.json) と [`gas/Code.gs`](gas/Code.gs) で置き換えて保存
-4. 関数 `setup` を選んで「実行」→ 権限を承認（「このアプリは Google で確認されていません」と出たら「詳細」→「（安全ではないページ）に移動」）
-5. 実行ログを確認
-   - `接続先チャンネル:` が、再生リストを持っているチャンネルであること
-   - `YT_TOKEN_SECRET = ...` の値を控える
-6. 「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、次のユーザーとして実行「自分」、アクセスできるユーザー「全員」でデプロイし、**ウェブアプリのURL**（`https://script.google.com/macros/s/.../exec`）を控える
+4. 「プロジェクトの設定」→「スクリプト プロパティ」に、次を追加して保存
+
+| プロパティ | 値 |
+|---|---|
+| `ALLOWED_REPOSITORY` | 非公開リポジトリを `持ち主/名前` で（例 `slerk3357/my-playlists`。大文字・小文字も GitHub の表示どおりに） |
+| `ALLOWED_REPOSITORY_ID` | （推奨）非公開リポジトリの数字のID。リポジトリを消して同じ名前で作り直された場合も拒めます。`https://api.github.com/repos/持ち主/名前` の `"id"`（非公開なのでログインしたブラウザで開くか、`gh api repos/持ち主/名前 --jq .id`） |
+
+5. 関数 `setup` を選んで「実行」→ 権限を承認（「このアプリは Google で確認されていません」と出たら「詳細」→「（安全ではないページ）に移動」）
+6. 実行ログで、`接続先チャンネル:` が再生リストを持っているチャンネルであること、`許可するリポジトリ:` が正しいことを確認
+7. 「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、次のユーザーとして実行「自分」、アクセスできるユーザー「全員」でデプロイし、**ウェブアプリのURL**（`https://script.google.com/macros/s/.../exec`）を控える
+
+> **以前の方式（`YT_TOKEN_SECRET`）から移るとき：** `Code.gs` を置き換え、スクリプト プロパティを設定して `setup` を実行し、「デプロイを管理」→ 今のデプロイを編集 →「バージョン：新バージョン」で更新します（URLは変わりません）。GitHub の Secrets の `YT_TOKEN_SECRET` は削除してください。
 
 > **ブランドアカウントの注意：** Apps Script が操作できるのは、そのGoogleアカウント本体のチャンネルだけです。ブランドアカウントのチャンネルで再生リストを管理している場合は、末尾の「別の認証方法」を使ってください。
 
 ### 3. GitHub に登録
-非公開リポジトリの Settings → Secrets and variables → Actions に、次の2つを登録します。
+非公開リポジトリの Settings → Secrets and variables → Actions に、次を登録します。
 
 | 名前 | 値 |
 |---|---|
 | `YT_TOKEN_URL` | ウェブアプリのURL |
-| `YT_TOKEN_SECRET` | 控えた秘密の文字列 |
 
-URLと秘密の文字列が両方漏れると、あなたのYouTubeを操作できてしまいます。漏れた疑いがあるときは、Apps Script で `rotateSecret` を実行し、`YT_TOKEN_SECRET` を更新してください。
+URL だけが漏れても、トークンは受け取れません（GitHub の OIDC トークンが必要なため）。URL を秘密にしているのは、無関係な人に叩かれないようにするためです。
 
 ### 4. 設定ファイル
-今の再生リストから下書きを作れます（手元のPCで実行）。
+今の再生リストから下書きを作れます。Actions →「playlist-tools」→「Run workflow」で、command に `draft_config` を選んで実行すると、`config.draft.yaml` がリポジトリにコミットされます（サマリーにも表示されます）。YouTube を読み書きするコマンドは、Apps Script の認証のため GitHub Actions の中でだけ動きます。
+
+手元では、整合性の確認と整形だけを行います。
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export YT_TOKEN_URL=... YT_TOKEN_SECRET=...
-python -m ytpl.draft_config > config.draft.yaml
 ```
 文字列はすべてダブルクオートで囲む決まりです（下書きは囲んだ状態で出力されます）。`config.draft.yaml` と `config.example.yaml`、[docs/config.md](docs/config.md) を見比べながら、`config.yaml` を作ってコミットします。特に以下を確認してください。
 - 各チャンネルの `channels`：TOPIC・サブチャンネルを候補コメントから追加（`name` も書く）
@@ -127,7 +133,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
   - **取り消し:** 反映前の「追加」と「却下」は取り消せます（反映済みの追加は、このシステムでは再生リストから消せないので、YouTube 上で消してください）。
   - **どちらも選ばない:** 次回も提案されます。「まとめて YouTube で開く」では、まだ決めていない曲を一時リストで続けて聴けます（クォータは使いません）。
   - 決めた内容は Worker（Durable Object）に保存され、同期のたびに `data/decisions.yaml` にも記録されます（git に残るので、Worker 側のデータが消えても却下は守られます）。
-- YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、手元で `python -m ytpl.pull_config` を実行します。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
+- YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、Actions →「playlist-tools」で `pull_config` を実行します（まず dry_run のまま内容を確認し、外して実行するとコミットされます）。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
 
 ## オリジナルミックスリスト
@@ -213,12 +219,10 @@ Worker の Settings → Variables and Secrets で、必要なら次を**シー�
 | pending | 入るはずだが、クォータの都合で未追加（次回追加） |
 | failed | 追加に失敗（エラー理由つき） |
 
-再生リストが壊れたら、手元で：
-```bash
-python -m ytpl.restore --playlist "アリスチャンネル" --dry-run      # 消えた曲を確認
-python -m ytpl.restore --playlist "アリスチャンネル"                # 消えた曲を戻す
-python -m ytpl.restore --playlist "アリスチャンネル" --to-new "アリスチャンネル（復元）"  # 丸ごと作り直す
-```
+再生リストが壊れたら、Actions →「playlist-tools」で command に `restore` を選び、playlist に台帳の再生リスト名（例 `アリスチャンネル`）を入れて実行します。
+- dry_run のまま：消えた曲を確認
+- dry_run を外す：消えた曲を元の再生リストに戻す
+- to_new に名前（例 `アリスチャンネル（復元）`）を入れる：その名前で新しい再生リストを作って丸ごと復元
 過去のある時点の状態は `git log -p data/playlists/アリスチャンネル.yaml` でたどれます。
 
 ## クォータについて
@@ -243,7 +247,7 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
    pip install -r requirements.txt && pip install google-auth-oauthlib
    python scripts/get_token.py client_secret_xxx.json
    ```
-5. 表示された `YT_CLIENT_ID` `YT_CLIENT_SECRET` `YT_REFRESH_TOKEN` を Secrets に登録（`YT_TOKEN_URL` は登録しない）
+5. 表示された `YT_CLIENT_ID` `YT_CLIENT_SECRET` `YT_REFRESH_TOKEN` を Secrets に登録（`YT_TOKEN_URL` は登録しない）。この方式なら、手元でも `export` して `python -m ytpl.pull_config` などを実行できます
 
 ## セキュリティ
 
@@ -251,13 +255,14 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 - **削除しない:** 再生リストから曲を消す API は実装していません。追加先も `config.yaml` で管理している再生リストだけです（ただし YouTube のトークン自体には削除の権限もあるので、下の「秘密の扱い」が重要です）。
 - **外部の人に入れさせない:** 概要欄の @ハンドル/チャンネルIDで自動追加するのは、**監視しているチャンネルの動画**が**今の @ハンドル**（またはチャンネルID）を書いている場合だけです。検索で見つけた監視外のチャンネルの動画や、過去の @ハンドルだけで一致した動画は、自動では入れず「未仕分け」と追加の提案で確認します。
 - **追加の提案の決定:** Worker は「今の提案にある曲と提案先」だけを受け付け、同期側でも、その曲がその提案先の確認候補かを確かめてから追加します。どちらかの記録が改ざんされても、提案になかった曲は入りません。
+- **YouTube の認証:** Apps Script は、GitHub の公開鍵で OIDC トークンの署名を確かめ、発行元・宛先・期限・使い回し・リポジトリ（とID）・main ブランチ・ワークフロー（`sync.yml` と `tools.yml`）・GitHub のランナーかを照合してから、YouTube のトークンを返します。
 - **Worker の認証:** Cloudflare Access を通ったリクエストだけを受け付けます。画面と「追加」「却下」の送信はログインした人だけ、同期用 API は同期用のサービストークン（`SYNC_CLIENT_ID`）だけが使えます。合言葉のような独自の鍵は使いません。
 - **依存の固定:** GitHub Actions はコミットの SHA で、Python のパッケージはバージョンとハッシュで固定しています（`requirements.in` を変えたら `pip-compile` で `requirements.txt` を作り直す）。Worker の npm パッケージは `package-lock.json` で固定しています。Actions の権限はジョブごとに最小にしています。
 
 ### 設定しておくこと（非公開リポジトリ・各サービス）
 1. **二段階認証:** Google（YouTube のアカウント）、GitHub、Cloudflare のすべてで有効にします。どれか1つでも乗っ取られると、ここにある対策はすべて迂回されます。
 2. **main ブランチの保護:** 非公開リポジトリの Settings → Rules → Rulesets → New branch ruleset で、対象を `main` にし、**Block force pushes** と **Restrict deletions** を有効にします。バックアップ（`data/`）の履歴を消されないようにするためです。プルリクエストの必須化はしません（同期が直接 push するため）。
-3. **秘密の扱い:** `YT_TOKEN_URL` と `YT_TOKEN_SECRET` の組は、YouTube のすべての操作（削除を含む）ができるトークンを受け取れます。GitHub の Secrets 以外に置かないでください。漏れた疑いがあれば、Apps Script で `rotateSecret` を実行して `YT_TOKEN_SECRET` を更新し、Web アプリも「新しいデプロイ」で作り直して `YT_TOKEN_URL` を更新します。サービストークンが漏れた疑いがあれば、Zero Trust で失効させて作り直します（このトークンでは決定の読み出しと反映結果の送信しかできません）。
+3. **秘密の扱い:** Apps Script は、GitHub の OIDC トークン（その実行専用・数分で失効・使い回し不可）を確かめてからトークンを返すので、保存しておく秘密はありません。守るべきなのは、**非公開リポジトリの main ブランチと、`.github/workflows/sync.yml`・`tools.yml` の中身**です（ここを書き換えられると、YouTube のトークンを受け取るジョブを作れてしまう）。共同編集者を増やさず、ワークフローの変更は内容を確かめてから取り込んでください。Apps Script のプロジェクトも、自分以外を編集者にしないでください。サービストークンが漏れた疑いがあれば、Zero Trust で失効させて作り直します（このトークンでは決定の読み出しと反映結果の送信しかできません）。
 4. **Cloudflare の GitHub 連携:** GitHub の Settings → Applications → Installed GitHub Apps → Cloudflare Workers and Pages → Repository access を **Only select repositories** にして、非公開リポジトリだけを選びます。
 5. **依存の更新:** `.github/dependabot.yml` により、Actions・Python・Worker の依存の更新が月1回プルリクエストで届きます。中身（変更履歴）を確認してからマージしてください。
 
@@ -266,6 +271,7 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install pytest
 pytest -q                     # 偽APIを使ったテスト
+node --test gas/test/*.test.mjs   # Apps Script の OIDC 検証のテスト
 python -m ytpl.check          # config.yaml の整合性チェック（--fix で整形も）
-python -m ytpl.sync --dry-run # 手元で試す（環境変数が必要）
+python -m ytpl.sync --dry-run # 手元で試す（自前の OAuth クライアントの環境変数が必要。Apps Script の方式では Actions の dry_run を使う）
 ```
