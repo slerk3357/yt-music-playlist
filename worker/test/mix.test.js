@@ -313,6 +313,9 @@ test("同期用 API：サービストークンの Client ID で確かめ、決�
   // getIdentity() から読めても通す
   const svc2 = { access: { getIdentity: async () => ({ common_name: "abc.access" }) } };
   assert.equal((await w.fetch(get(null), env, svc2)).status, 200);
+  // サービストークンでは、画面や /api/decide は使えない（トークンが漏れても決定は送れない）
+  assert.equal((await w.fetch(new Request("https://mix.example/suggestions"), env, svc2)).status, 403);
+  assert.equal((await w.fetch(post("/api/decide", { target: "PLother", video: VID(2), action: "add" }), env, svc2)).status, 403);
   const { decisions } = await (await w.fetch(get("abc.access"), env, svc)).json();
   assert.equal(decisions.length, 1);
   const d = decisions[0];

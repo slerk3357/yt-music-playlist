@@ -231,9 +231,11 @@ export async function authorize(env, ctx, service = false, request = null) {
     const got = await serviceClientId(ctx, request);
     return got && safeEqual(got, expected) ? null : "同期用のサービストークンではありません";
   }
+  // 画面と /api/decide は、ログインした人（メールアドレスのある認証）だけ。サービストークンでは使えない
+  const email = await identityEmail(ctx);
+  if (!email) return "ログインした人だけが使えます（サービストークンでは使えません）";
   const allowed = String(env.ALLOWED_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   if (allowed.length === 0) return null;
-  const email = await identityEmail(ctx);
   return allowed.includes(email) ? null : "このアカウントでは利用できません";
 }
 
