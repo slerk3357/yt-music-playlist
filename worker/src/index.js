@@ -5,7 +5,9 @@
 //   GET /playlists?k=3      ランダムに選んだ k 個の再生リストから
 //   GET /top/<name>         特にお気に入りのチャンネル <name>（または番号）の再生リストから
 //   GET /suggestions        ほかの再生リストへの追加の提案（提案先ごとの一覧）
-//   GET /suggestions/<n>?p=0  n 番目の提案先の曲を、50曲ずつ YouTube の一時リストで開く（to=music で YouTube Music）
+//   GET /suggestions/<n>?p=0  n 番目の提案先のまだ決めていない曲を、50曲ずつ YouTube の一時リストで開く（to=music で YouTube Music）
+//   POST /api/decide        提案への決定（追加・却下・取り消し）。Durable Object（DECISIONS）に保存する
+//   GET  /api/sync/decisions, POST /api/sync/ack   毎日の同期用（サービストークン＋X-Sync-Key）
 //
 // 認証：Worker を Cloudflare Access で保護し（Google ログイン）、Access で認証されていない
 // リクエストは拒否する。ALLOWED_EMAILS を設定すると、そのメールアドレスだけに限定する。
@@ -21,6 +23,7 @@
 // 非公開リポジトリの data/mix/index.json を Worker に組み込んだもの。毎日の同期で索引が
 // 更新されると、Cloudflare が自動でビルドし直す（ビルドの監視パスに data/mix/index.json を入れる）。
 
+import { ACTIONS, stateLabel } from "./decisions.js";
 import {
   MAX_VIDEOS, YT_PACKAGE, escapeHtml, intentUrl, musicUrl, parseWatchRedirect, pickMix, safeEqual, watchVideosUrl,
   youtubeUrl,
@@ -45,9 +48,94 @@ const STYLE = `<style>body{font-family:system-ui,sans-serif;margin:24px;line-hei
 li{list-style:none}ul{padding:0}small{color:#666}h2{margin-top:1.5em;font-size:1em;color:#444}
 .btn{display:inline-block;margin:4px 8px 4px 0;padding:8px 12px;border:1px solid #888;border-radius:8px;text-decoration:none;font-size:1em}
 .item{padding:6px 0;border-bottom:1px solid #eee}.item a{padding:0;font-size:1em}
-.group{margin-top:1.5em;padding-top:.5em;border-top:3px solid #ccc}h2{font-size:1.15em;color:#222}</style>`;
+.group{margin-top:1.5em;padding-top:.5em;border-top:3px solid #ccc}h2{font-size:1.15em;color:#222}
+.item{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}.item[hidden]{display:none}.item.decided{opacity:.6}
+.meta{flex:1 1 260px;min-width:0}.play{position:relative;padding:0;border:0;background:#000;cursor:pointer;width:160px;aspect-ratio:16/9}
+.play img{width:100%;height:100%;object-fit:cover;display:block}.play span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:2em;text-shadow:0 0 6px #000}
+.item iframe{width:min(100%,480px);aspect-ratio:16/9;border:0;flex:1 1 320px}
+.actions{margin-top:6px}.actions button{margin:4px 6px 4px 0;padding:8px 14px;border-radius:8px;border:1px solid #888;background:#fff;font-size:1em}
+.actions .add{background:#e7f3e7}.actions .reject{background:#f6e6e6}.actions button:disabled{opacity:.45}</style>`;
 
-function suggestionsPage(sug, base) {
+/** 提案先の再生リストID -> {group, n, items: Map(動画ID -> 提案)} */
+function suggestionIndex(sug) {
+  const m = new Map();
+  (sug.groups || []).forEach((g, n) => {
+    if (g.id) m.set(g.id, { group: g, n, items: new Map(g.items.map((it) => [it.id, it])) });
+  });
+  return m;
+}
+
+function decisionMap(records) {
+  const m = new Map();
+  for (const r of records || []) m.set(`${r.target}:${r.video}`, r);
+  return m;
+}
+
+/** まだ決めていない提案（取り消したものも含む）。 */
+function undecided(g, decisions) {
+  if (!decisions || !g.id) return g.items;
+  return g.items.filter((it) => {
+    const r = decisions.get(`${g.id}:${it.id}`);
+    return !r || r.action === "none" || (r.action === "add" && r.applied_at && !["added", "already"].includes(r.result));
+  });
+}
+
+const PAGE_SCRIPT = `
+const base = document.body.dataset.base;
+const hide = document.getElementById("hide");
+function refresh() {
+  for (const li of document.querySelectorAll(".item")) {
+    const a = li.dataset.action;
+    li.classList.toggle("decided", !!a && a !== "none");
+    li.hidden = hide.checked && li.classList.contains("decided");
+    const done = li.dataset.fixed === "1";
+    li.querySelector(".undo").hidden = !a || a === "none" || done;
+    for (const b of li.querySelectorAll(".act")) b.disabled = done || li.dataset.busy === "1" || b.dataset.a === a;
+  }
+  for (const sec of document.querySelectorAll(".group")) {
+    const all = sec.querySelectorAll(".item").length;
+    const left = [...sec.querySelectorAll(".item")].filter((li) => !li.classList.contains("decided")).length;
+    sec.querySelector(".left").textContent = "未決定 " + left + " / " + all + " 曲";
+  }
+}
+document.addEventListener("click", async (ev) => {
+  const play = ev.target.closest(".play");
+  if (play) {
+    const id = play.dataset.v;
+    const f = document.createElement("iframe");
+    f.src = "https://www.youtube-nocookie.com/embed/" + encodeURIComponent(id) + "?autoplay=1&playsinline=1&rel=0";
+    f.allow = "autoplay; encrypted-media; picture-in-picture";
+    f.allowFullscreen = true;
+    f.title = play.dataset.title || id;
+    play.replaceWith(f);
+    return;
+  }
+  const btn = ev.target.closest(".act, .undo");
+  if (!btn) return;
+  const li = btn.closest(".item");
+  const action = btn.classList.contains("undo") ? "none" : btn.dataset.a;
+  li.dataset.busy = "1"; refresh();
+  const st = li.querySelector(".state");
+  st.textContent = "送信中…";
+  try {
+    const res = await fetch(base + "/api/decide", {
+      method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+      body: JSON.stringify({ target: li.dataset.t, video: li.dataset.v, action }),
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(r.error || res.status);
+    li.dataset.action = r.record ? r.record.action : "none";
+    st.textContent = r.label || "";
+  } catch (e) {
+    st.textContent = "送信できませんでした: " + e.message;
+  }
+  li.dataset.busy = "0"; refresh();
+});
+hide.addEventListener("change", refresh);
+refresh();
+`;
+
+function suggestionsPage(sug, base, decisions) {
   const groups = sug.groups || [];
   const total = groups.reduce((n, g) => n + g.items.length, 0);
   // 同じ曲が複数の再生リストに提案されている場合に、ほかの提案先も表示する
@@ -56,39 +144,51 @@ function suggestionsPage(sug, base) {
   const nav = groups.map((g, n) => `<a class="btn" href="#g${n}">${escapeHtml(g.name)}（${g.items.length}）</a>`).join("");
   const body = groups.map((g, n) => {
     const name = escapeHtml(g.name);
-    const pages = Math.ceil(g.items.length / MAX_VIDEOS);
+    const left = undecided(g, decisions);
+    const pages = Math.ceil(left.length / MAX_VIDEOS);
     const opens = Array.from({ length: pages }, (_, p) => {
       const from = p * MAX_VIDEOS + 1;
-      const to = Math.min(g.items.length, (p + 1) * MAX_VIDEOS);
+      const to = Math.min(left.length, (p + 1) * MAX_VIDEOS);
       const label = pages > 1 ? `（${from}〜${to}曲目）` : "";
-      return `<a class="btn" href="${base}/suggestions/${n}?p=${p}">「${name}」への提案を YouTube で開く${label}</a>` +
+      return `<a class="btn" href="${base}/suggestions/${n}?p=${p}">まとめて YouTube で開く${label}</a>` +
         `<a class="btn" href="${base}/suggestions/${n}?p=${p}&to=music">YouTube Music で開く${label}</a>`;
     }).join("");
     const target = g.id
       ? `<a href="https://www.youtube.com/playlist?list=${encodeURIComponent(g.id)}">提案先「${name}」を YouTube で開く</a>`
-      : "<small>（提案先の再生リストはまだ作られていません）</small>";
+      : "<small>（提案先の再生リストが見つからないため、ここでは決められません）</small>";
     const items = g.items.map((it) => {
       const others = (targetsOf.get(it.id) || []).filter((x) => x !== g.name);
-      return `<li class="item"><a href="https://youtu.be/${encodeURIComponent(it.id)}">${escapeHtml(it.title || it.id)}</a>
-<br><small>${escapeHtml(it.channel || "")}</small>
-<br><small>提案先: <b>${name}</b>・理由: ${escapeHtml(it.reason)}${
+      const rec = decisions && g.id ? decisions.get(`${g.id}:${it.id}`) : null;
+      const fixed = rec && rec.action === "add" && rec.applied_at && ["added", "already"].includes(rec.result);
+      const vid = escapeHtml(it.id);
+      const canDecide = !!(g.id && decisions);
+      return `<li class="item" data-t="${escapeHtml(g.id || "")}" data-v="${vid}" data-action="${escapeHtml(rec?.action || "")}" data-fixed="${fixed ? 1 : 0}">
+<button class="play" data-v="${vid}" data-title="${escapeHtml(it.title || "")}" aria-label="再生"><img loading="lazy" alt="" src="https://i.ytimg.com/vi/${vid}/mqdefault.jpg"><span>▶</span></button>
+<div class="meta"><a href="https://youtu.be/${vid}">${escapeHtml(it.title || it.id)}</a>
+<br><small>${escapeHtml(it.channel || "")}${it.published_at ? `・${escapeHtml(String(it.published_at).slice(0, 10))}` : ""}</small>
+<br><small>理由: ${escapeHtml(it.reason)}${
         it.in && it.in.length ? `・今入っている: ${escapeHtml(it.in.join("、"))}` : ""}${
-        others.length ? `・ほかの提案先: ${escapeHtml(others.join("、"))}` : ""}</small></li>`;
+        others.length ? `・ほかの提案先: ${escapeHtml(others.join("、"))}` : ""}</small>
+${canDecide ? `<div class="actions"><button class="act add" data-a="add">「${name}」に追加</button><button class="act reject" data-a="reject">却下</button>
+<button class="undo" hidden>取り消し</button> <small class="state">${escapeHtml(stateLabel(rec))}</small></div>` : ""}</div></li>`;
     }).join("");
     return `<section id="g${n}" class="group"><h2>提案先: ${name}（${g.items.length} 曲）</h2>
-<div>${opens}</div><div>${target}</div><ul>${items}</ul></section>`;
+<p><small class="left"></small></p><div>${target}</div><div>${opens}</div><ul>${items}</ul></section>`;
   }).join("");
+  const note = decisions
+    ? `<p><small>曲ごとに ▶ で再生して確かめ、<b>追加</b>か<b>却下</b>を選びます。追加にした曲は、<b>次回の同期</b>（毎朝）で提案先の再生リストに入ります。
+却下にした曲は、その提案先にはもう提案しません。どちらも選ばなかった曲は、次回も提案されます。
+追加の反映前と、却下は「取り消し」で戻せます（反映済みの追加は、このシステムでは消せません）。</small></p>`
+    : `<p><small><b>決定の保存先（Durable Object）が設定されていないため、追加・却下は選べません。</b>README の「追加の提案の決定を、毎日の同期に渡す」を確認してください。</small></p>`;
   return `<!doctype html><html lang="ja"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>追加の提案</title>${STYLE}</head><body>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>追加の提案</title>${STYLE}</head><body data-base="${escapeHtml(base)}">
 <h1>追加の提案</h1>
 <p><small>${total} 件（${escapeHtml(sug.generated_at || "")} 時点）。提案は<b>提案先の再生リストごと</b>に分かれています。</small></p>
-<ol><li><small>「○○への提案を YouTube で開く」で、その提案先への提案だけを一時的な再生リストとして開きます。</small></li>
-<li><small>採用する曲：再生画面の「保存」から、<b>その提案先</b>の再生リストに保存します。</small></li>
-<li><small>却下する曲：「保存」から<b>「提案を却下」</b>に保存します。次回から提案されません。</small></li>
-<li><small>どちらにもしなかった曲は「未確認」として、次回も提案されます。</small></li></ol>
-<p><small>YouTube の一時的な再生リストには名前が付かないため、どの提案先の分を開いたかは、このページで確認してください。</small></p>
+${note}
+<p><label><input type="checkbox" id="hide" checked> 決めた曲を隠す</label></p>
 <div>${nav}</div>
-${body || "<p>提案はありません。</p>"}<p><a href="${base}/">← メニュー</a></p></body></html>`;
+${body || "<p>提案はありません。</p>"}<p><a href="${base}/">← メニュー</a></p>
+<script>${PAGE_SCRIPT}</script></body></html>`;
 }
 
 function menu(index, base, sug = EMPTY_SUGGESTIONS) {
@@ -117,76 +217,147 @@ function json(data, status = 200) {
 }
 
 /**
- * Cloudflare Access で認証されたリクエストか確かめる。
+ * Cloudflare Access で認証されたリクエストか確かめる。拒否の理由（文字列）か null を返す。
  * Worker 単位で Access を有効にすると ctx.access が渡される（認証されていなければ undefined）。
+ * service が true（毎日の同期からの呼び出し）のときは、メールアドレスでは確かめない
+ * （サービストークンにはメールアドレスがないため。代わりに SYNC_KEY で確かめる）。
  */
-export async function authorize(env, ctx) {
+export async function authorize(env, ctx, service = false) {
   if (env.REQUIRE_ACCESS === "false") return null; // 手元での試験用。本番では使わない
   if (!ctx?.access) return "Cloudflare Access によるログインが必要です（Worker の Access 設定を確認してください）";
+  if (service) return null;
   const allowed = String(env.ALLOWED_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   if (allowed.length === 0) return null;
-  let email = "";
-  try {
-    email = String((await ctx.access.getIdentity())?.email || "").toLowerCase();
-  } catch {
-    email = "";
-  }
+  const email = await identityEmail(ctx);
   return allowed.includes(email) ? null : "このアカウントでは利用できません";
+}
+
+async function identityEmail(ctx) {
+  try {
+    return String((await ctx?.access?.getIdentity())?.email || "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** 決定の保存先（Durable Object）。設定されていなければ null。 */
+function decisionStore(env) {
+  const ns = env.DECISIONS;
+  if (!ns) return null;
+  return ns.get(ns.idFromName("main"));
+}
+
+async function readDecisions(env) {
+  const store = decisionStore(env);
+  if (!store) return null;
+  return decisionMap(await store.list());
 }
 
 /** 索引と提案を受け取ってハンドラを作る（テストでは別のデータを渡す）。 */
 export function createHandler(index, suggestions = EMPTY_SUGGESTIONS) {
-  return { fetch: (request, env, ctx) => handle(request, env, ctx, index, suggestions) };
+  const sugIndex = suggestionIndex(suggestions);
+  return { fetch: (request, env, ctx) => handle(request, env, ctx, index, suggestions, sugIndex) };
 }
 
-async function handle(request, env, ctx, index, sug) {
-  {
-    const denied = await authorize(env, ctx);
-    if (denied) return new Response(denied, { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+const text = (body, status) => new Response(body, { status, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
-    const url = new URL(request.url);
-    let parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-    let base = "";
-    if (env.ACCESS_KEY) {
-      // 合言葉が合わなければ、存在しないページとして扱う
-      if (!safeEqual(parts[0] ?? "", env.ACCESS_KEY)) return new Response("Not Found", { status: 404 });
-      base = `/${encodeURIComponent(parts[0])}`;
-      parts = parts.slice(1);
-    }
-    const html = (body) => new Response(body, {
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-    });
-    if (parts.length === 0) return html(menu(index, base, sug));
+async function handle(request, env, ctx, index, sug, sugIndex) {
+  const url = new URL(request.url);
+  let parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  let base = "";
+  if (env.ACCESS_KEY) {
+    // 合言葉が合わなければ、存在しないページとして扱う
+    if (!safeEqual(parts[0] ?? "", env.ACCESS_KEY)) return text("Not Found", 404);
+    base = `/${encodeURIComponent(parts[0])}`;
+    parts = parts.slice(1);
+  }
+  const service = parts[0] === "api" && parts[1] === "sync";
+  const denied = await authorize(env, ctx, service);
+  if (denied) return text(denied, 403);
+  if (parts[0] === "api") return api(request, env, ctx, url, parts, sugIndex);
+  if (request.method !== "GET" && request.method !== "HEAD") return text("Method Not Allowed", 405);
 
-    const q = Object.fromEntries(url.searchParams);
-    if (parts[0] === "suggestions") {
-      if (parts.length === 1) return html(suggestionsPage(sug, base));
-      const g = (sug.groups || [])[Number(parts[1])];
-      const page = Math.max(0, Number.parseInt(q.p ?? "0", 10) || 0);
-      const ids = g ? g.items.slice(page * MAX_VIDEOS, (page + 1) * MAX_VIDEOS).map((it) => it.id) : [];
-      if (ids.length === 0) return new Response("提案がありません", { status: 404 });
-      const temp = await resolveTemporaryList(ids).catch(() => null);
-      let target;
-      if (!temp) target = watchVideosUrl(ids);
-      else if (q.to === "music") target = q.app === "intent" ? intentUrl(musicUrl(temp)) : musicUrl(temp);
-      else target = q.app === "intent" ? intentUrl(youtubeUrl(temp), YT_PACKAGE) : youtubeUrl(temp);
-      if (format(q) === "json") return json({ name: g.name, videos: ids, temporary_list: temp?.list ?? null, open_url: target });
-      return new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } });
-    }
-    const mode = parts[0];
-    const mix = pickMix(index, mode, { ...q, name: parts[1] });
-    if (mix.error) return format(q) === "json" ? json(mix, mix.status) : new Response(mix.error, { status: mix.status });
-    if (mix.videos.length === 0) return new Response("対象の曲がありません", { status: 404 });
+  const html = (body) => new Response(body, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+  if (parts.length === 0) return html(menu(index, base, sug));
 
-    const temp = await resolveTemporaryList(mix.videos).catch(() => null);
-    const music = temp ? musicUrl(temp, q.open) : null;
-    // 一時リストを作れなかったときは、watch_videos の URL を直接開く（YouTube 側で一時リストになる）
-    const target = music ? (q.app === "intent" ? intentUrl(music) : music) : watchVideosUrl(mix.videos);
-    if (format(q) === "json") {
-      return json({ ...mix, temporary_list: temp?.list ?? null, music_url: music, open_url: target });
-    }
+  const q = Object.fromEntries(url.searchParams);
+  if (parts[0] === "suggestions") {
+    const decisions = await readDecisions(env).catch(() => null);
+    if (parts.length === 1) return html(suggestionsPage(sug, base, decisions));
+    const g = (sug.groups || [])[Number(parts[1])];
+    const page = Math.max(0, Number.parseInt(q.p ?? "0", 10) || 0);
+    const ids = g ? undecided(g, decisions).slice(page * MAX_VIDEOS, (page + 1) * MAX_VIDEOS).map((it) => it.id) : [];
+    if (ids.length === 0) return text("提案がありません", 404);
+    const temp = await resolveTemporaryList(ids).catch(() => null);
+    let target;
+    if (!temp) target = watchVideosUrl(ids);
+    else if (q.to === "music") target = q.app === "intent" ? intentUrl(musicUrl(temp)) : musicUrl(temp);
+    else target = q.app === "intent" ? intentUrl(youtubeUrl(temp), YT_PACKAGE) : youtubeUrl(temp);
+    if (format(q) === "json") return json({ name: g.name, videos: ids, temporary_list: temp?.list ?? null, open_url: target });
     return new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } });
   }
+  const mode = parts[0];
+  const mix = pickMix(index, mode, { ...q, name: parts[1] });
+  if (mix.error) return format(q) === "json" ? json(mix, mix.status) : text(mix.error, mix.status);
+  if (mix.videos.length === 0) return text("対象の曲がありません", 404);
+
+  const temp = await resolveTemporaryList(mix.videos).catch(() => null);
+  const music = temp ? musicUrl(temp, q.open) : null;
+  // 一時リストを作れなかったときは、watch_videos の URL を直接開く（YouTube 側で一時リストになる）
+  const target = music ? (q.app === "intent" ? intentUrl(music) : music) : watchVideosUrl(mix.videos);
+  if (format(q) === "json") {
+    return json({ ...mix, temporary_list: temp?.list ?? null, music_url: music, open_url: target });
+  }
+  return new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } });
+}
+
+/**
+ * API
+ *   POST /api/decide              {target, video, action}  画面のボタンから（action: add / reject / none）
+ *   GET  /api/sync/decisions      毎日の同期が決定を読む（X-Sync-Key が必要）
+ *   POST /api/sync/ack            毎日の同期が反映結果を返す {results: [...]}（X-Sync-Key が必要）
+ */
+async function api(request, env, ctx, url, parts, sugIndex) {
+  const store = decisionStore(env);
+  if (!store) return json({ error: "決定の保存先（DECISIONS）が設定されていません" }, 503);
+  const route = parts.slice(1).join("/");
+
+  if (route.startsWith("sync/")) {
+    if (!env.SYNC_KEY) return json({ error: "SYNC_KEY が設定されていません" }, 503);
+    if (!safeEqual(request.headers.get("X-Sync-Key") || "", env.SYNC_KEY)) return json({ error: "鍵が違います" }, 403);
+    if (route === "sync/decisions" && request.method === "GET") {
+      return json({ version: 1, decisions: await store.list() });
+    }
+    if (route === "sync/ack" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      if (!body || !Array.isArray(body.results)) return json({ error: "results がありません" }, 400);
+      return json({ acknowledged: await store.ack(body.results) });
+    }
+    return json({ error: "Not Found" }, 404);
+  }
+
+  if (route === "decide" && request.method === "POST") {
+    // ほかのサイトから送らせない（同じオリジンの画面からの JSON だけを受け付ける）
+    if (request.headers.get("Origin") !== url.origin) return json({ error: "送信元が違います" }, 403);
+    if (!String(request.headers.get("Content-Type") || "").startsWith("application/json")) {
+      return json({ error: "JSON で送ってください" }, 415);
+    }
+    const body = await request.json().catch(() => null);
+    const { target, video, action } = body || {};
+    if (!ACTIONS.includes(action)) return json({ error: "action は add / reject / none のどれかです" }, 400);
+    // 今の提案に含まれている曲と提案先だけを受け付ける
+    const g = sugIndex.get(String(target || ""));
+    const it = g?.items.get(String(video || ""));
+    if (!it) return json({ error: "この曲は今の提案にありません（ページを読み込み直してください）" }, 404);
+    const r = await store.decide(target, video, action, {
+      target_name: g.group.name, title: it.title ?? null, channel: it.channel ?? null, by: (await identityEmail(ctx)) || null,
+    });
+    if (!r.ok) return json({ error: r.error, record: r.record ?? null, label: stateLabel(r.record) }, r.status);
+    return json({ record: r.record, label: stateLabel(r.record) });
+  }
+  return json({ error: "Not Found" }, 404);
 }
 
 function format(q) {

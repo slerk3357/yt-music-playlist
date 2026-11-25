@@ -186,9 +186,10 @@ test("提案ページに提案先ごとの一覧と開くボタンがある", as
   const w = createHandler(INDEX_DATA, SUG);
   const html = await (await w.fetch(new Request("https://mix.example/suggestions"), ENV, CTX)).text();
   assert.match(html, /提案先: その他A（60 曲）/);
-  assert.match(html, /「その他A」への提案を YouTube で開く/);
-  assert.match(html, /提案先: <b>曲X<\/b>/);
-  assert.match(html, /提案を却下/);
+  assert.match(html, /まとめて YouTube で開く/);
+  assert.match(html, /提案先: 曲X（1 曲）/);
+  assert.match(html, /決定の保存先（Durable Object）が設定されていない/);   // DECISIONS がなければボタンは出さない
+  assert.doesNotMatch(html, /class="act add"/);
   assert.match(html, /href="\/suggestions\/0\?p=0"/);
   assert.match(html, /href="\/suggestions\/0\?p=1"/);            // 60曲 → 50曲ずつ2つ
   assert.match(html, /list=PLother/);
@@ -210,4 +211,123 @@ test("提案を YouTube の一時リストで開く（50曲ずつ）", async () 
   const intent = await w.fetch(new Request("https://mix.example/suggestions/1?app=intent"), ENV, CTX);
   assert.match(intent.headers.get("location"), /package=com\.google\.android\.youtube;end$/);
   assert.equal((await w.fetch(new Request("https://mix.example/suggestions/9"), ENV, CTX)).status, 404);
+});
+
+// ---- 追加・却下の決定（Durable Object の代わりに Map を使う） ----
+import { DecisionLog, stateLabel } from "../src/decisions.js";
+
+function fakeNamespace() {
+  const map = new Map();
+  const storage = {
+    async get(k) { return structuredClone(map.get(k)); },
+    async put(k, v) { map.set(k, structuredClone(v)); },
+    async list({ prefix }) { return new Map([...map].filter(([k]) => k.startsWith(prefix)).sort()); },
+  };
+  let t = 0;
+  const log = new DecisionLog(storage, () => `2026-11-25T00:00:${String(t++).padStart(2, "0")}Z`);
+  return { map, idFromName: (n) => n, get: () => log };
+}
+
+const VID = (n) => `vid${String(n).padStart(8, "0")}`;     // 11文字の動画ID
+const SUG2 = {
+  version: 1, generated_at: "2026-11-25T04:00:00+09:00",
+  groups: [{ name: "その他A", id: "PLother", items: [1, 2, 3].map((n) => ({
+    id: VID(n), title: `曲${n}`, channel: "B", reason: "名前（aliases）だけの一致", in: ["その他の曲"] })) }],
+};
+
+function post(path, body, headers = {}) {
+  return new Request(`https://mix.example${path}`, {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", Origin: "https://mix.example", ...headers },
+  });
+}
+
+test("提案ページに埋め込み再生と追加・却下のボタンがある", async () => {
+  setupWorld();
+  const env = { ...ENV, DECISIONS: fakeNamespace() };
+  const html = await (await createHandler(INDEX_DATA, SUG2).fetch(new Request("https://mix.example/suggestions"), env, CTX)).text();
+  assert.match(html, /class="play" data-v="vid00000001"/);
+  assert.match(html, /i\.ytimg\.com\/vi\/vid00000001\/mqdefault\.jpg/);
+  assert.match(html, /youtube-nocookie\.com\/embed\//);         // ▶ で埋め込みの動画に差し替える
+  assert.match(html, /「その他A」に追加<\/button>/);
+  assert.match(html, /却下<\/button>/);
+});
+
+test("追加・却下を送ると保存され、ページと一時リストに反映される", async () => {
+  setupWorld();
+  const ns = fakeNamespace();
+  const env = { ...ENV, DECISIONS: ns };
+  const w = createHandler(INDEX_DATA, SUG2);
+  let res = await w.fetch(post("/api/decide", { target: "PLother", video: VID(1), action: "add" }), env, CTX);
+  assert.equal(res.status, 200);
+  const r = await res.json();
+  assert.equal(r.record.action, "add");
+  assert.equal(r.record.by, "me@gmail.com");
+  assert.equal(r.label, "追加予定（次回の同期で反映）");
+  res = await w.fetch(post("/api/decide", { target: "PLother", video: VID(2), action: "reject" }), env, CTX);
+  assert.equal((await res.json()).label, "却下");
+
+  const html = await (await w.fetch(new Request("https://mix.example/suggestions"), env, CTX)).text();
+  assert.match(html, /data-v="vid00000001" data-action="add"/);
+  assert.match(html, /追加予定（次回の同期で反映）/);
+  const j = await (await w.fetch(new Request("https://mix.example/suggestions/0?format=json"), env, CTX)).json();
+  assert.deepEqual(j.videos, [VID(3)]);                          // まとめて開くのは、まだ決めていない曲だけ
+
+  // 取り消し
+  res = await w.fetch(post("/api/decide", { target: "PLother", video: VID(2), action: "none" }), env, CTX);
+  assert.equal((await res.json()).record.action, "none");
+});
+
+test("決定の送信は同じ画面からの、今の提案にある曲だけ", async () => {
+  setupWorld();
+  const env = { ...ENV, DECISIONS: fakeNamespace() };
+  const w = createHandler(INDEX_DATA, SUG2);
+  const ok = { target: "PLother", video: VID(1), action: "add" };
+  assert.equal((await w.fetch(post("/api/decide", ok, { Origin: "https://evil.example" }), env, CTX)).status, 403);
+  assert.equal((await w.fetch(post("/api/decide", ok, { "Content-Type": "text/plain" }), env, CTX)).status, 415);
+  assert.equal((await w.fetch(post("/api/decide", { ...ok, video: VID(9) }), env, CTX)).status, 404);
+  assert.equal((await w.fetch(post("/api/decide", { ...ok, target: "PLelse" }), env, CTX)).status, 404);
+  assert.equal((await w.fetch(post("/api/decide", { ...ok, action: "delete" }), env, CTX)).status, 400);
+  assert.equal((await w.fetch(post("/api/decide", ok), env, {})).status, 403);          // Access なし
+  assert.equal((await w.fetch(post("/api/decide", ok), { ...env, DECISIONS: undefined }, CTX)).status, 503);
+});
+
+test("同期用 API：鍵で確かめ、決定を返し、反映結果を記録する", async () => {
+  setupWorld();
+  const ns = fakeNamespace();
+  const env = { ...ENV, DECISIONS: ns, SYNC_KEY: "sync-secret" };
+  const w = createHandler(INDEX_DATA, SUG2);
+  await w.fetch(post("/api/decide", { target: "PLother", video: VID(1), action: "add" }), env, CTX);
+  // サービストークンで来たリクエスト（メールアドレスなし）。ALLOWED_EMAILS があっても鍵で通す
+  const svc = { access: { getIdentity: async () => ({}) } };
+  const get = (key) => new Request("https://mix.example/api/sync/decisions", { headers: key ? { "X-Sync-Key": key } : {} });
+  assert.equal((await w.fetch(get(null), env, svc)).status, 403);
+  assert.equal((await w.fetch(get("wrong"), env, svc)).status, 403);
+  assert.equal((await w.fetch(get("sync-secret"), env, {})).status, 403);              // Access を通っていない
+  assert.equal((await w.fetch(get("sync-secret"), { ...env, SYNC_KEY: "" }, svc)).status, 503);
+  const { decisions } = await (await w.fetch(get("sync-secret"), env, svc)).json();
+  assert.equal(decisions.length, 1);
+  const d = decisions[0];
+  assert.equal(d.target_name, "その他A");
+
+  const ack = (results) => new Request("https://mix.example/api/sync/ack", {
+    method: "POST", headers: { "X-Sync-Key": "sync-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ results }),
+  });
+  // 古い decided_at の結果は無視する
+  let r = await (await w.fetch(ack([{ ...d, decided_at: "old", result: "added" }]), env, svc)).json();
+  assert.equal(r.acknowledged, 0);
+  r = await (await w.fetch(ack([{ target: d.target, video: d.video, decided_at: d.decided_at, result: "added" }]), env, svc)).json();
+  assert.equal(r.acknowledged, 1);
+  const html = await (await w.fetch(new Request("https://mix.example/suggestions"), env, CTX)).text();
+  assert.match(html, /追加済み/);
+  // 反映済みの追加は取り消せない（このシステムは曲を消さない）
+  const res = await w.fetch(post("/api/decide", { target: "PLother", video: VID(1), action: "none" }), env, CTX);
+  assert.equal(res.status, 409);
+});
+
+test("stateLabel", () => {
+  assert.equal(stateLabel(null), "");
+  assert.equal(stateLabel({ action: "add", applied_at: "x", result: "failed", error: "videoNotFound" }),
+    "追加できませんでした（videoNotFound）");
 });

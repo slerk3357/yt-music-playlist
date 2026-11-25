@@ -56,6 +56,11 @@ jobs:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          # 追加の提案の決定（ミックスAPIの画面で選んだもの）を読む。なくても動く
+          MIX_WORKER_URL: ${{ secrets.MIX_WORKER_URL }}
+          MIX_SYNC_KEY: ${{ secrets.MIX_SYNC_KEY }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: >-
           python -m ytpl.sync
           ${{ github.event_name == 'push' && '--create-only' || '' }}

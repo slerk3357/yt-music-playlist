@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --import ./test/support/register.mjs --test test/*.test.js",
     "build": "node build.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"

@@ -140,8 +140,9 @@ MV_RE = re.compile(r"\bmv\b|\bpv\b|music video|ミュージックビデオ")
 # ==========================================================================
 TIERS = (("top_favorites", "top"), ("favorites", "favorite"), ("occasional", "occasional"))
 ROLE_ORDER = ["top", "favorite", "occasional", "official", "source"]
-# システムが使う決まった再生リスト（id がなければ自動で作る）
-#   unsorted: 未仕分け（追加だけ）/ misc: その他の曲（人が入れる）/ rejected: 提案を却下（人が入れる。読み取りだけ）
+# システムが使う決まった再生リスト（unsorted と misc は、id がなければ自動で作る）
+#   unsorted: 未仕分け（追加だけ）/ misc: その他の曲（人が入れる）
+#   rejected: 提案を却下（旧方式。今は Worker の画面で却下する。config.yaml に書いた場合だけ読む。自動では作らない）
 DEFAULT_NAMES = {"unsorted": "未仕分け", "misc": "その他の曲", "rejected": "提案を却下"}
 
 
@@ -202,7 +203,8 @@ def _pl(ref: dict | None, key: str, auto: bool, path: tuple, creatable=True) -> 
 def fixed_playlists(cfg: Config) -> dict[str, PL]:
     """「未仕分け」と「その他の曲」。"""
     ps = cfg.raw.get("playlists") or {}
-    return {k: _pl({"name": DEFAULT_NAMES[k], **(ps.get(k) or {})}, k, True, ("playlists", k)) for k in DEFAULT_NAMES}
+    return {k: _pl({"name": DEFAULT_NAMES[k], **(ps.get(k) or {})}, k, True, ("playlists", k),
+                   creatable=(k != "rejected" or bool(ps.get(k)))) for k in DEFAULT_NAMES}
 
 
 def declared_playlists(cfg: Config) -> list[PL]:
@@ -270,14 +272,18 @@ def handle_channel_ids(cfg: Config) -> set[str]:
     return out
 
 
-def ref_tokens(channel_ids, handles: dict[str, str] | None) -> set[str]:
-    """チャンネルを指す文字列（チャンネルIDと@ハンドル、小文字化）。"""
+def ref_tokens(channel_ids, handles: dict | None) -> set[str]:
+    """チャンネルを指す文字列（チャンネルIDと@ハンドル、小文字化）。
+
+    handles はチャンネルID -> @ハンドル、または @ハンドルのリスト（今のものと過去のもの）。
+    """
     toks = set()
     for cid in channel_ids or []:
         toks.add(cid.lower())
-        h = (handles or {}).get(cid)
-        if h:
-            toks.add(nfkc(h if h.startswith("@") else "@" + h))
+        hs = (handles or {}).get(cid) or []
+        for h in [hs] if isinstance(hs, str) else hs:
+            if h:
+                toks.add(nfkc(h if h.startswith("@") else "@" + h))
     return toks
 
 

@@ -321,7 +321,7 @@ def test_no_delete_api():
 def test_playlists_created_first_even_without_quota_for_reads(tmp_path):
     """読み取りでクォータが尽きても、再生リストの作成は先に終わっている。"""
     yt = setup(tmp_path)
-    yt.budget = 1 + 50 * 3                  # 一覧の取得と、再生リスト3つ（星の歌・キャロルとデイブ・提案を却下）の作成だけ
+    yt.budget = 1 + 50 * 2                  # 一覧の取得と、再生リスト2つ（星の歌・キャロルとデイブ）の作成だけ
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     t = titles(yt)
     assert t["星の歌"] == [] and t["キャロルとデイブ"] == []
@@ -334,7 +334,7 @@ def test_create_only_and_no_duplicate(tmp_path):
     run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
     t = titles(yt)
     assert t["星の歌"] == [] and t["キャロルとデイブ"] == []      # 作成だけ。中身は追加しない
-    assert yt.used == 1 + 50 * 3            # 星の歌・キャロルとデイブ・提案を却下
+    assert yt.used == 1 + 50 * 2            # 星の歌・キャロルとデイブ（「提案を却下」は今は作らない）
     # config.yaml への書き戻しが失われた（push失敗など）場合でも、二重に作らない
     (tmp_path / "config.yaml").write_text(CONFIG, encoding="utf-8")
     run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
@@ -519,20 +519,132 @@ def test_suggestions_json(tmp_path):
     assert item["id"] == "c3" and item["in"] == ["その他の曲"] and "名前" in item["reason"]
 
 
-def test_rejected_suggestions_are_not_suggested_again(tmp_path):
-    """「提案を却下」に入れた曲は提案しない（未確認の提案とは区別できる）。"""
+class FakeRemote:
+    """Worker の同期用 API の代わり。"""
+
+    def __init__(self, decisions=(), fail=False):
+        self.decisions = [dict(d) for d in decisions]
+        self.acks = []
+        self.fail = fail
+
+    def fetch(self):
+        from ytpl.decisions import RemoteError
+        if self.fail:
+            raise RemoteError("つながりません")
+        return [dict(d) for d in self.decisions]
+
+    def ack(self, results):
+        from ytpl.decisions import RemoteError
+        if self.fail:
+            raise RemoteError("つながりません")
+        self.acks.append(results)
+        for r in results:
+            for d in self.decisions:
+                if (d["target"], d["video"], d["decided_at"]) == (r["target"], r["video"], r["decided_at"]):
+                    d.update(applied_at=r["applied_at"], result=r["result"])
+        return len(results)
+
+
+def D_(target, video, action, at="2026-01-01T12:00:00Z", **k):
+    return {"target": target, "video": video, "action": action, "decided_at": at, **k}
+
+
+def test_decisions_from_worker_are_applied_next_run(tmp_path):
+    """Worker の画面で「追加」にした曲は次の実行で入れ、「却下」にした曲はもう提案しない。"""
+    import json
     yt = setup(tmp_path)
-    run(yt=yt, now=day(1, 10), **kw(tmp_path))
-    rej = next(k for k, p in yt.pl.items() if p["title"] == "提案を却下")      # 自動で作られている
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
     yt.pl["PLmisc"]["items"].append("c3")
-    run(yt=yt, now=day(1, 11), **kw(tmp_path))
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
     sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
     assert "朝の曲 / キャロル" in sug and "【cover】夜の曲 / ボブ" in sug
-    yt.pl[rej]["items"].append("c3")                                          # c3 の提案を却下
-    run(yt=yt, now=day(1, 12), **kw(tmp_path))
+
+    remote = FakeRemote([D_("PLaliceOther", "c3", "add", target_name="その他アリス", title="朝の曲 / キャロル"),
+                         D_("PLbob", "b1", "reject")])
+    text = run(yt=yt, now=day(1, 12), remote=remote, **kw(tmp_path))
+    assert "c3" in titles(yt)["その他アリス"]
+    assert "[提案から追加] その他アリス ← 朝の曲 / キャロル" in text
+    assert "b1" not in titles(yt)["ボブチャンネル"]                       # 却下は追加しない
     sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
-    assert "朝の曲 / キャロル" not in sug and "【cover】夜の曲 / ボブ" in sug   # b1 は未確認のまま残る
-    assert titles(yt)["提案を却下"] == ["c3"]                                  # システムは追加しない
-    import json
-    idx = json.loads((tmp_path / "data/mix/index.json").read_text(encoding="utf-8"))
-    assert "提案を却下" not in {p["name"] for p in idx["playlists"]}
+    assert "朝の曲 / キャロル" not in sug and "【cover】夜の曲 / ボブ" not in sug
+    groups = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))["groups"]
+    assert not any(it["id"] in ("b1", "c3") for g in groups for it in g["items"])
+    results = {r["video"]: r["result"] for r in remote.acks[-1]}
+    assert results == {"c3": "added", "b1": "recorded"}
+    saved = load_yaml(tmp_path / "data/decisions.yaml")["decisions"]
+    assert {(d["video"], d["result"]) for d in saved} == {("c3", "added"), ("b1", "recorded")}
+
+    # 次の実行で同じ決定をもう一度読んでも、二重に追加しない。Worker が止まっていても却下は手元の記録で守られる
+    n = len(titles(yt)["その他アリス"])
+    run(yt=yt, now=day(1, 13), remote=FakeRemote(fail=True), **kw(tmp_path))
+    assert len(titles(yt)["その他アリス"]) == n
+    assert "【cover】夜の曲 / ボブ" not in (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+
+
+def test_decisions_retry_ack_and_redecide(tmp_path):
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    yt.pl["PLmisc"]["items"].append("c3")
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    # 決定を読めたが、結果を返せなかった
+    remote = FakeRemote([D_("PLbob", "b1", "reject")])
+    real_ack = remote.ack
+    remote.ack = lambda r: (_ for _ in ()).throw(__import__("ytpl.decisions").decisions.RemoteError("x"))
+    text = run(yt=yt, now=day(1, 12), remote=remote, **kw(tmp_path))
+    assert "反映結果を Worker に送れませんでした" in text
+    remote.ack = real_ack
+    run(yt=yt, now=day(1, 13), remote=remote, **kw(tmp_path))              # 次の実行で送り直す
+    assert remote.acks and remote.acks[-1][0]["result"] == "recorded"
+    # 却下を取り消した（Worker で決め直した）ら、また提案する
+    remote.decisions = [D_("PLbob", "b1", "none", at="2026-01-02T00:00:00Z")]
+    run(yt=yt, now=day(1, 14), remote=remote, **kw(tmp_path))
+    assert "【cover】夜の曲 / ボブ" in (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    # 管理対象でない再生リストへの「追加」は行わない
+    remote.decisions = [D_("PLunsorted", "b1", "add", at="2026-01-03T00:00:00Z")]
+    text = run(yt=yt, now=day(1, 15), remote=remote, **kw(tmp_path))
+    assert "b1" not in titles(yt)["未仕分け"]
+    assert remote.acks[-1][0]["result"] == "invalid"
+
+
+def test_handles_refreshed_daily_and_past_handles_kept(tmp_path):
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    st = load_yaml(tmp_path / "data/state.yaml")
+    assert st["handles"][A]["handle"] == "@alice_official"
+    yt.handles = {**yt.handles, A: "@alice_new"}                          # ハンドルを変えた
+    text = run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    assert "@alice_official → @alice_new" in text
+    st = load_yaml(tmp_path / "data/state.yaml")
+    assert st["handles"][A]["handle"] == "@alice_new"
+    assert [p["handle"] for p in st["handles"][A]["past"]] == ["@alice_official"]
+    from ytpl.sync import handles_of
+    assert handles_of(st)[A] == ["@alice_new", "@alice_official"]
+    toks = rules.ref_tokens([A], handles_of(st))
+    assert "@alice_official" in toks and "@alice_new" in toks             # 古いハンドルの言及も照合に使う
+    # 同じ日のうちは取り直さない。見つからなかったチャンネルは前の記録を残す
+    used = yt.used
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    yt.missing_channels = {A}
+    run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
+    assert load_yaml(tmp_path / "data/state.yaml")["handles"][A]["handle"] == "@alice_new"
+    assert used > 0
+
+
+def test_legacy_rejected_playlist_still_honored(tmp_path):
+    """（旧方式）config.yaml に「提案を却下」の id を書いていれば、そこに入れた曲は提案しない。"""
+    cfg = CONFIG.replace('  misc: {id: "PLmisc", name: "その他の曲"}',
+                         '  misc: {id: "PLmisc", name: "その他の曲"}\n  rejected: {id: "PLrej", name: "提案を却下"}')
+    yt = setup(tmp_path, cfg)
+    yt.pl["PLrej"] = {"title": "提案を却下", "items": ["c3"]}
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    yt.pl["PLmisc"]["items"].append("c3")
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    assert "朝の曲 / キャロル" not in sug and "【cover】夜の曲 / ボブ" in sug
+    assert titles(yt)["提案を却下"] == ["c3"]
+
+
+def test_rejected_playlist_not_created_automatically(tmp_path):
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    assert "提案を却下" not in titles(yt)
