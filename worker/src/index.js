@@ -223,7 +223,6 @@ function json(data, status = 200) {
  * （サービストークンにはメールアドレスがないため。代わりにトークンの Client ID で確かめる）。
  */
 export async function authorize(env, ctx, service = false, request = null) {
-  if (env.REQUIRE_ACCESS === "false" && !service) return null; // 手元での試験用。本番では使わない
   if (!ctx?.access) return "Cloudflare Access によるログインが必要です（Worker の Access 設定を確認してください）";
   if (service) {
     const expected = String(env.SYNC_CLIENT_ID || "").trim();

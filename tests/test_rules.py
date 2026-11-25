@@ -362,3 +362,29 @@ def test_promotion_does_not_promote_artist_names(tmp_path):
                                            {"video_id": "a", "title": "バンドK - 白日"}], idx, rules.channel_roles(cfg))
     assert [c["name"] for c in out] == ["白日"]          # アーティスト名（バンドK）は昇格しない
     assert idx.r["a"].key != idx.r["b"].key              # 別の曲を同じ曲とみなさない
+
+
+def test_unmonitored_or_past_handle_mentions_need_review(tmp_path):
+    """監視外のチャンネルの動画や、過去の @ハンドルだけで一致した動画は、自動では入れず確認に回す。"""
+    A, B, X = C("a"), C("b"), C("stranger")
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}]
+    specials:
+      - playlist: {{name: "Aの関係曲"}}
+favorites:
+  - name: "B"
+    channels: [{{id: "{B}", name: "B"}}]
+""")
+    vs = [V("own", "Aの曲", A),
+          V("b_now", "曲1 / B", B, desc="with @a_now"),         # 監視しているチャンネルが今のハンドルを書いた → 自動
+          V("b_old", "曲2 / B", B, desc="with @a_old"),         # 過去のハンドルだけ → 確認
+          V("x_now", "曲3 / X", X, desc="with @a_now"),         # 監視外のチャンネル → 確認
+          V("x_id", "曲4 / X", X, desc=f"youtube.com/channel/{A}")]
+    t, _ = targets(cfg, vs, {A: ["@a_now", "@a_old"]})
+    sp = t["Aの関係曲"]
+    assert sp.auto == {"own", "b_now"}
+    assert sp.cand == {"b_old", "x_now", "x_id"}
+    assert sp.why["b_old"] == "過去の @ハンドルだけで一致"
+    assert "監視していないチャンネル" in sp.why["x_now"]

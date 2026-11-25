@@ -599,6 +599,11 @@ def test_decisions_retry_ack_and_redecide(tmp_path):
     remote.decisions = [D_("PLbob", "b1", "none", at="2026-01-02T00:00:00Z")]
     run(yt=yt, now=day(1, 14), remote=remote, **kw(tmp_path))
     assert "【cover】夜の曲 / ボブ" in (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    # 今の提案にない曲（Worker 側の記録が改ざんされた場合など）は入れない
+    remote.decisions = [D_("PLaliceOther", "o2", "add", at="2026-01-02T12:00:00Z")]
+    text = run(yt=yt, now=day(1, 14), remote=remote, **kw(tmp_path))
+    assert "o2" not in titles(yt)["その他アリス"] and "今の提案にない曲です" in text
+    assert remote.acks[-1][0]["result"] == "invalid"
     # 管理対象でない再生リストへの「追加」は行わない
     remote.decisions = [D_("PLunsorted", "b1", "add", at="2026-01-03T00:00:00Z")]
     text = run(yt=yt, now=day(1, 15), remote=remote, **kw(tmp_path))

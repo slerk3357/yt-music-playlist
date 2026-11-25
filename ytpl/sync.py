@@ -464,6 +464,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                 plan_items.append((rank(pl, vid, inc), pub(vid), pl, vid))
     # 2' Worker の画面で「追加」にした曲（手動指定と同じ順位）
     by_pid = {pids[tg.pl.key]: tg.pl for tg in targets if pids.get(tg.pl.key) and pids[tg.pl.key] not in ignored}
+    # 追加できるのは、その提案先の確認候補（＝提案に出しうる曲）だけ。Worker 側の記録が改ざんされても、
+    # 提案になかった曲は入れない
+    allowed = {pids[tg.pl.key]: tg.cand | tg.auto for tg in targets if pids.get(tg.pl.key)}
     planned = {(pl.key, vid) for _, _, pl, vid in plan_items}
     decided: dict[tuple[str, str], dict] = {}
     for rec in decisions.pending_adds():
@@ -477,6 +480,11 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         if ledger.status(pid, vid) == "present":
             if not dry_run:
                 decisions.mark(rec, "already", now.isoformat(timespec="seconds"))
+            continue
+        if vid not in allowed.get(pid, set()):
+            if not dry_run:
+                decisions.mark(rec, "invalid", now.isoformat(timespec="seconds"), "今の提案にない曲です")
+            rep.add("提案から追加できなかった曲", f"{pl.name} ← {rec.get('title') or vid}: 今の提案にない曲です")
             continue
         decided[(pid, vid)] = rec
         if (pl.key, vid) in planned:

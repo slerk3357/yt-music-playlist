@@ -1,0 +1,5 @@
+# 直接使うパッケージ。ここを変えたら、次のコマンドで requirements.txt（ハッシュ付きの固定版）を作り直す
+#   pip-compile --generate-hashes --strip-extras --allow-unsafe --output-file requirements.txt requirements.in
+google-api-python-client>=2.100
+google-auth>=2.20
+ruamel.yaml>=0.18

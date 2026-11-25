@@ -240,15 +240,31 @@ Google Cloud の OAuth 同意画面を「本番環境」に公開できる場合
 4. 手元で次を実行し、ブラウザで再生リストを持っているチャンネルを選んで許可
    ```bash
    python3 -m venv .venv && source .venv/bin/activate
-   pip install -r requirements.txt google-auth-oauthlib
+   pip install -r requirements.txt && pip install google-auth-oauthlib
    python scripts/get_token.py client_secret_xxx.json
    ```
 5. 表示された `YT_CLIENT_ID` `YT_CLIENT_SECRET` `YT_REFRESH_TOKEN` を Secrets に登録（`YT_TOKEN_URL` は登録しない）
 
+## セキュリティ
+
+### システム側の対策
+- **削除しない:** 再生リストから曲を消す API は実装していません。追加先も `config.yaml` で管理している再生リストだけです（ただし YouTube のトークン自体には削除の権限もあるので、下の「秘密の扱い」が重要です）。
+- **外部の人に入れさせない:** 概要欄の @ハンドル/チャンネルIDで自動追加するのは、**監視しているチャンネルの動画**が**今の @ハンドル**（またはチャンネルID）を書いている場合だけです。検索で見つけた監視外のチャンネルの動画や、過去の @ハンドルだけで一致した動画は、自動では入れず「未仕分け」と追加の提案で確認します。
+- **追加の提案の決定:** Worker は「今の提案にある曲と提案先」だけを受け付け、同期側でも、その曲がその提案先の確認候補かを確かめてから追加します。どちらかの記録が改ざんされても、提案になかった曲は入りません。
+- **Worker の認証:** Cloudflare Access を通ったリクエストだけを受け付けます。画面と「追加」「却下」の送信はログインした人だけ、同期用 API は同期用のサービストークン（`SYNC_CLIENT_ID`）だけが使えます。合言葉のような独自の鍵は使いません。
+- **依存の固定:** GitHub Actions はコミットの SHA で、Python のパッケージはバージョンとハッシュで固定しています（`requirements.in` を変えたら `pip-compile` で `requirements.txt` を作り直す）。Worker の npm パッケージは `package-lock.json` で固定しています。Actions の権限はジョブごとに最小にしています。
+
+### 設定しておくこと（非公開リポジトリ・各サービス）
+1. **二段階認証:** Google（YouTube のアカウント）、GitHub、Cloudflare のすべてで有効にします。どれか1つでも乗っ取られると、ここにある対策はすべて迂回されます。
+2. **main ブランチの保護:** 非公開リポジトリの Settings → Rules → Rulesets → New branch ruleset で、対象を `main` にし、**Block force pushes** と **Restrict deletions** を有効にします。バックアップ（`data/`）の履歴を消されないようにするためです。プルリクエストの必須化はしません（同期が直接 push するため）。
+3. **秘密の扱い:** `YT_TOKEN_URL` と `YT_TOKEN_SECRET` の組は、YouTube のすべての操作（削除を含む）ができるトークンを受け取れます。GitHub の Secrets 以外に置かないでください。漏れた疑いがあれば、Apps Script で `rotateSecret` を実行して `YT_TOKEN_SECRET` を更新し、Web アプリも「新しいデプロイ」で作り直して `YT_TOKEN_URL` を更新します。サービストークンが漏れた疑いがあれば、Zero Trust で失効させて作り直します（このトークンでは決定の読み出しと反映結果の送信しかできません）。
+4. **Cloudflare の GitHub 連携:** GitHub の Settings → Applications → Installed GitHub Apps → Cloudflare Workers and Pages → Repository access を **Only select repositories** にして、非公開リポジトリだけを選びます。
+5. **依存の更新:** `.github/dependabot.yml` により、Actions・Python・Worker の依存の更新が月1回プルリクエストで届きます。中身（変更履歴）を確認してからマージしてください。
+
 ## 開発
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt pytest
+pip install -r requirements.txt && pip install pytest
 pytest -q                     # 偽APIを使ったテスト
 python -m ytpl.check          # config.yaml の整合性チェック（--fix で整形も）
 python -m ytpl.sync --dry-run # 手元で試す（環境変数が必要）

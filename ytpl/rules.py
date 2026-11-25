@@ -550,6 +550,22 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
     tier_channels = {c for c, r in roles.items() if r["role"] in ("top", "favorite", "occasional")}
     off = {vid for vid, r in idx.r.items() if r.off}
     out: list[Target] = []
+    # @ハンドル/チャンネルIDの記載で「確認できた」とみなすのは、監視しているチャンネルの動画が
+    # 今の @ハンドル（またはチャンネルID）を書いている場合だけ。次のものは自動では入れず、確認に回す：
+    #   ・監視していないチャンネルの動画（検索で見つけた動画など。誰でも概要欄に @ハンドルを書けるため）
+    #   ・過去の @ハンドルだけで一致した動画（手放されたハンドルを他人が取っている場合があるため）
+    monitored = idx.channels(roles)
+    current = {c: ([h] if isinstance(h, str) else list(h)[:1]) for c, h in (handles or {}).items()}
+    weak_why: dict[str, str] = {}
+
+    def ref_split(channel_ids) -> tuple[set, set]:
+        """(確認できた動画, 確認に回す動画)"""
+        trusted = idx.mentioning(ref_tokens(channel_ids, current)) & monitored
+        weak = idx.mentioning(ref_tokens(channel_ids, handles)) - trusted
+        for v in weak:
+            weak_why.setdefault(v, "監視していないチャンネルの動画（@ハンドル/IDの記載だけ）" if v not in monitored
+                                else "過去の @ハンドルだけで一致")
+        return trusted, weak
 
     def ent_of(extra=None):
         return lambda cid: (extra or {}).get(cid) or ents.get(cid) or cid
@@ -583,8 +599,11 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
     for key, tier, i, e in tier_entries(cfg):
         own_ids = ids(e.get("channels"))
         own = idx.channels(own_ids)
-        verified = idx.mentioning(ref_tokens(own_ids, handles)) - own
+        verified, weak = ref_split(own_ids)
+        verified -= own
+        weak -= own | verified
         by_name = (idx.alias_hits(e.get("aliases")) - own - verified) if e.get("aliases") else set()
+        by_name |= weak
 
         # 特別再生リスト：対象範囲のうち、書かれた条件をすべて満たすもの
         in_specials = set()
@@ -595,8 +614,9 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
 
             def split(pool, refs_ids, aliases, base_verified=frozenset()):
                 """(チャンネルで確認できた動画, 名前だけで一致した動画) に分ける。"""
-                ver = (pool & set(base_verified)) | (pool & idx.mentioning(ref_tokens(refs_ids, handles)))
-                return ver, idx.alias_hits(aliases, among=pool) - ver
+                trusted, weak = ref_split(refs_ids)
+                ver = (pool & set(base_verified)) | (pool & trusted)
+                return ver, (idx.alias_hits(aliases, among=pool) | (pool & weak)) - ver
 
             if not sp.get("require_related", True):
                 # 関係の確認なし：published_by（なければ全動画）を対象に、書いた条件だけで判定
@@ -630,7 +650,7 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
                 hits.append(h)
             in_specials |= hits[0] | hits[1]
             pl = _pl(sp["playlist"], f"special:{key}:{i}:{j}", sp.get("auto", True), (key, i, "specials", j, "playlist"))
-            emit(pl, hits[0], hits[1], sp)
+            emit(pl, hits[0], hits[1], sp, why=weak_why)
 
         if e.get("playlist"):
             pl = _pl(e["playlist"], f"own:{key}:{i}", e.get("auto", tier == "top"), (key, i, "playlist"))
@@ -644,7 +664,8 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             if other.get("exclude_keywords"):
                 rest -= idx.title_has(other["exclude_keywords"], rest)
             pl = _pl(op, f"other:{key}:{i}", False, (key, i, "other", "playlist"), creatable=False)
-            emit(pl, rest, set(), other, why={v: "名前（aliases）だけの一致" for v in by_name},
+            emit(pl, rest, set(), other,
+                 why={v: weak_why.get(v) or "名前（aliases）だけの一致" for v in by_name},
                  reason="「その他○○」の関係曲（常に確認）")
 
     # お気に入りの曲：公式＋登録チャンネルのカバー
