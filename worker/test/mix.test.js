@@ -108,15 +108,11 @@ test("許可していないメールアドレスなら 403", async () => {
   assert.equal((await worker.fetch(new Request("https://mix.example/random"), ENV, broken)).status, 403);
 });
 
-test("合言葉を設定した場合は URL の先頭にも必要", async () => {
+test("URL の先頭に合言葉は使わない（ACCESS_KEY は無視する）", async () => {
   setupWorld();
   const env = { ...ENV, ACCESS_KEY: "secret-key" };
-  assert.equal((await worker.fetch(new Request("https://mix.example/wrong/random"), env, CTX)).status, 404);
-  assert.equal((await worker.fetch(new Request("https://mix.example/random"), env, CTX)).status, 404);
-  const ok = await worker.fetch(new Request("https://mix.example/secret-key/random"), env, CTX);
-  assert.equal(ok.status, 302);
-  const menu = await (await worker.fetch(new Request("https://mix.example/secret-key/"), env, CTX)).text();
-  assert.match(menu, /href="\/secret-key\/random"/);
+  assert.equal((await worker.fetch(new Request("https://mix.example/random"), env, CTX)).status, 302);
+  assert.equal((await worker.fetch(new Request("https://mix.example/secret-key/random"), env, CTX)).status, 404);
 });
 
 test("ミックスは YouTube Music の一時リストへ 302", async () => {
@@ -292,26 +288,39 @@ test("決定の送信は同じ画面からの、今の提案にある曲だけ",
   assert.equal((await w.fetch(post("/api/decide", ok), { ...env, DECISIONS: undefined }, CTX)).status, 503);
 });
 
-test("同期用 API：鍵で確かめ、決定を返し、反映結果を記録する", async () => {
+function jwtWith(payload) {
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  return `${b64({ alg: "RS256" })}.${b64(payload)}.sig`;
+}
+
+test("同期用 API：サービストークンの Client ID で確かめ、決定を返し、反映結果を記録する", async () => {
   setupWorld();
   const ns = fakeNamespace();
-  const env = { ...ENV, DECISIONS: ns, SYNC_KEY: "sync-secret" };
+  const env = { ...ENV, DECISIONS: ns, SYNC_CLIENT_ID: "abc.access" };
   const w = createHandler(INDEX_DATA, SUG2);
   await w.fetch(post("/api/decide", { target: "PLother", video: VID(1), action: "add" }), env, CTX);
-  // サービストークンで来たリクエスト（メールアドレスなし）。ALLOWED_EMAILS があっても鍵で通す
+  // Access が通したサービストークンのリクエスト（メールアドレスなし、common_name が Client ID）
   const svc = { access: { getIdentity: async () => ({}) } };
-  const get = (key) => new Request("https://mix.example/api/sync/decisions", { headers: key ? { "X-Sync-Key": key } : {} });
-  assert.equal((await w.fetch(get(null), env, svc)).status, 403);
-  assert.equal((await w.fetch(get("wrong"), env, svc)).status, 403);
-  assert.equal((await w.fetch(get("sync-secret"), env, {})).status, 403);              // Access を通っていない
-  assert.equal((await w.fetch(get("sync-secret"), { ...env, SYNC_KEY: "" }, svc)).status, 503);
-  const { decisions } = await (await w.fetch(get("sync-secret"), env, svc)).json();
+  const get = (cn) => new Request("https://mix.example/api/sync/decisions", {
+    headers: cn ? { "Cf-Access-Jwt-Assertion": jwtWith({ common_name: cn, type: "app" }) } : {},
+  });
+  assert.equal((await w.fetch(get(null), env, svc)).status, 403);                          // トークンの情報なし
+  assert.equal((await w.fetch(get("other.access"), env, svc)).status, 403);                 // 別のトークン
+  assert.equal((await w.fetch(get("abc.access"), env, {})).status, 403);                    // Access を通っていない
+  assert.equal((await w.fetch(get("abc.access"), { ...env, SYNC_CLIENT_ID: "" }, svc)).status, 403);
+  // ログインした人（メールアドレスあり）は同期用 API を使えない
+  assert.equal((await w.fetch(get(null), env, CTX)).status, 403);
+  // getIdentity() から読めても通す
+  const svc2 = { access: { getIdentity: async () => ({ common_name: "abc.access" }) } };
+  assert.equal((await w.fetch(get(null), env, svc2)).status, 200);
+  const { decisions } = await (await w.fetch(get("abc.access"), env, svc)).json();
   assert.equal(decisions.length, 1);
   const d = decisions[0];
   assert.equal(d.target_name, "その他A");
 
   const ack = (results) => new Request("https://mix.example/api/sync/ack", {
-    method: "POST", headers: { "X-Sync-Key": "sync-secret", "Content-Type": "application/json" },
+    method: "POST",
+    headers: { "Cf-Access-Jwt-Assertion": jwtWith({ common_name: "abc.access" }), "Content-Type": "application/json" },
     body: JSON.stringify({ results }),
   });
   // 古い decided_at の結果は無視する

@@ -12,10 +12,9 @@ keep_vars = true
 [build]
 command = "node build.mjs"
 
-# 次の値は、このファイルには書かずにダッシュボードの「変数とシークレット」で登録する（どちらも任意）
+# 次の値は、このファイルには書かずにダッシュボードの「変数とシークレット」で登録する
 #   ALLOWED_EMAILS : 使ってよいアカウントのメールアドレス（複数ならカンマ区切り）。Access のポリシーに加えた二重の確認
-#   ACCESS_KEY     : URL の先頭に付ける合言葉
-#   SYNC_KEY       : 毎日の同期が追加の提案の決定を読むときの合言葉（シークレット）。GitHub の Secrets の MIX_SYNC_KEY と同じ値
+#   SYNC_CLIENT_ID : 毎日の同期に使う Access サービストークンの Client ID（秘密ではないので「変数」でよい）
 
 # 追加の提案に対する決定（追加・却下）の保存先。SQLite 方式の Durable Object（無料プランで使える）
 [[durable_objects.bindings]]

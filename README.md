@@ -174,16 +174,14 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 **3. 追加の提案の決定を、毎日の同期に渡す**
 
 「追加の提案」の画面で選んだ「追加」「却下」は、Worker の Durable Object（SQLite 方式。無料プランで使えます）に保存されます。保存先は `worker/wrangler.toml` に書いてあるので、デプロイすると自動で作られます。毎日の同期（GitHub Actions）がそれを読めるように、次を設定します。
-1. **合言葉を決める:** 長いランダムな文字列を1つ作ります（例：手元で `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`）。
-2. **Worker のシークレット:** Worker の Settings → Variables and Secrets に、**シークレット** `SYNC_KEY` として登録します。
-3. **サービストークン:** Zero Trust → Access controls → Service credentials → Service Tokens で、サービストークンを作ります（名前は例えば `yt-playlist-sync`、期間は長め）。表示される Client ID と Client Secret を控えます（Secret は作ったときにしか表示されません）。
-4. **Access のポリシーを追加:** Worker の Access の設定（アプリケーション）を開き、ポリシーを1つ追加します。**Action は Service Auth**、Include に **Service Token** でさっきのトークンを選びます。ふだんのログイン用のポリシーはそのまま残します。
-5. **GitHub の Secrets（非公開リポジトリ）:** 次の4つを登録します。
+1. **サービストークン:** Zero Trust → Access controls → Service credentials → Service Tokens で、サービストークンを作ります（名前は例えば `yt-playlist-sync`、期間は長め）。表示される Client ID と Client Secret を控えます（Secret は作ったときにしか表示されません）。期限が近づいたら Cloudflare 側で更新でき、漏れたときはその場で失効させられます。
+2. **Access のポリシーを追加:** Worker の Access の設定（アプリケーション）を開き、ポリシーを1つ追加します。**Action は Service Auth**、Include に **Service Token** でさっきのトークンを選びます。ふだんのログイン用のポリシーはそのまま残します。
+3. **Worker の変数:** Worker の Settings → Variables and Secrets に、**変数** `SYNC_CLIENT_ID` としてサービストークンの **Client ID** を登録します（秘密の値ではありません）。Worker は、Access が通したリクエストのうち、このトークンで来たものだけを同期用 API に通します。ログインした人のブラウザからは同期用 API を使えません。
+4. **GitHub の Secrets（非公開リポジトリ）:** 次の3つを登録します。
 
 | 名前 | 値 |
 |---|---|
-| `MIX_WORKER_URL` | Worker の URL（例 `https://yt-music-mix.<サブドメイン>.workers.dev`。`ACCESS_KEY` を使っているなら `/<合言葉>` まで含める） |
-| `MIX_SYNC_KEY` | 1. の合言葉（Worker の `SYNC_KEY` と同じ値） |
+| `MIX_WORKER_URL` | Worker の URL（例 `https://yt-music-mix.<サブドメイン>.workers.dev`） |
 | `CF_ACCESS_CLIENT_ID` | サービストークンの Client ID |
 | `CF_ACCESS_CLIENT_SECRET` | サービストークンの Client Secret |
 
@@ -194,7 +192,6 @@ Worker の Settings → Variables and Secrets で、必要なら次を**シー�
 | 名前 | 値 |
 |---|---|
 | `ALLOWED_EMAILS` | 使うアカウントのメールアドレス（複数ならカンマ区切り）。Access のポリシーに加えて、Worker 側でも本人か確かめます |
-| `ACCESS_KEY` | URL の先頭に付ける合言葉。付けると `/<合言葉>/random` のような URL になります |
 
 **注意**
 - **ログイン後のアプリ起動:** ログイン画面を経由した直後は、YouTube Music アプリではなくブラウザで開くことがあります。2回目以降（ログイン済み）は、そのままアプリが開きます。ブラウザで開いてしまう場合は `?app=intent` を付けてください。

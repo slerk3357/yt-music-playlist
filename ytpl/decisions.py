@@ -7,9 +7,8 @@ Worker が使えないとき（設定していない・つながらない）は�
 手元の記録は git に残るので、Worker 側のデータが消えても却下の記録は失われない。
 
 環境変数（GitHub の Secrets）
-  MIX_WORKER_URL          Worker の URL（ACCESS_KEY を使っている場合は、その合言葉まで含める）
-  MIX_SYNC_KEY            Worker の SYNC_KEY と同じ値
-  CF_ACCESS_CLIENT_ID     Cloudflare Access のサービストークン
+  MIX_WORKER_URL          Worker の URL（例 https://yt-music-mix.<サブドメイン>.workers.dev）
+  CF_ACCESS_CLIENT_ID     Cloudflare Access のサービストークン（Cloudflare が発行・失効・更新を管理する）
   CF_ACCESS_CLIENT_SECRET
 """
 from __future__ import annotations
@@ -32,32 +31,29 @@ class RemoteError(Exception):
 class Remote:
     """Worker の同期用 API（/api/sync/…）。"""
 
-    def __init__(self, base: str, key: str, client_id: str = "", client_secret: str = "", timeout: float = 20):
-        self.base = base.rstrip("/")
-        self.key = key
+    def __init__(self, url: str, client_id: str, client_secret: str, timeout: float = 20):
+        self.url = url.rstrip("/")
         self.client_id = client_id
         self.client_secret = client_secret
         self.timeout = timeout
 
     @classmethod
     def from_env(cls) -> "Remote | None":
-        base = os.environ.get("MIX_WORKER_URL", "").strip()
-        key = os.environ.get("MIX_SYNC_KEY", "").strip()
-        if not base or not key:
+        url = os.environ.get("MIX_WORKER_URL", "").strip()
+        cid = os.environ.get("CF_ACCESS_CLIENT_ID", "").strip()
+        secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip()
+        if not (url and cid and secret):
             return None
-        return cls(base, key, os.environ.get("CF_ACCESS_CLIENT_ID", "").strip(),
-                   os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip())
+        return cls(url, cid, secret)
 
     def _request(self, path: str, body: dict | None = None) -> dict:
-        headers = {"X-Sync-Key": self.key, "Accept": "application/json", "User-Agent": "yt-music-playlist-sync"}
-        if self.client_id:
-            headers["CF-Access-Client-Id"] = self.client_id
-            headers["CF-Access-Client-Secret"] = self.client_secret
+        headers = {"Accept": "application/json", "User-Agent": "yt-music-playlist-sync",
+                   "CF-Access-Client-Id": self.client_id, "CF-Access-Client-Secret": self.client_secret}
         data = None
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(self.base + path, data=data, headers=headers,
+        req = urllib.request.Request(self.url + path, data=data, headers=headers,
                                      method="POST" if body is not None else "GET")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as res:
