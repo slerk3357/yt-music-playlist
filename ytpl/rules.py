@@ -140,7 +140,9 @@ MV_RE = re.compile(r"\bmv\b|\bpv\b|music video|ミュージックビデオ")
 # ==========================================================================
 TIERS = (("top_favorites", "top"), ("favorites", "favorite"), ("occasional", "occasional"))
 ROLE_ORDER = ["top", "favorite", "occasional", "official", "source"]
-DEFAULT_NAMES = {"unsorted": "未仕分け", "misc": "その他の曲"}
+# システムが使う決まった再生リスト（id がなければ自動で作る）
+#   unsorted: 未仕分け（追加だけ）/ misc: その他の曲（人が入れる）/ rejected: 提案を却下（人が入れる。読み取りだけ）
+DEFAULT_NAMES = {"unsorted": "未仕分け", "misc": "その他の曲", "rejected": "提案を却下"}
 
 
 def ids(refs) -> list[str]:

@@ -43,6 +43,34 @@ def _label(v: dict | None, vid: str) -> str:
     return f"{v.get('title')} / {v.get('channel_title') or '?'} (https://youtu.be/{vid})"
 
 
+def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: datetime) -> None:
+    """追加の提案を、読む用（Markdown）と Worker 用（JSON）に書き出す。"""
+    import json
+
+    groups = sorted(suggestions.values(), key=lambda g: g["name"])
+    body = [f"# 追加の提案 {now:%Y-%m-%d %H:%M} JST", "",
+            "すでに別の再生リストに入っている曲や、お気に入りの曲の確認候補のうち、"
+            "まだ入れていない（消してもいない）ものです。自動では追加しません。",
+            "採用する曲は提案先の再生リストに、却下する曲は「提案を却下」に入れてください"
+            "（どちらにも入れていない曲は未確認として、次回も提案されます）。", ""]
+    for g in groups:
+        body.append(f"## 提案先: {g['name']}（{len(g['items'])}）")
+        for it in g["items"]:
+            note = f"理由: {it['reason']}" + (f" / 今入っている: {'、'.join(it['in'])}" if it["in"] else "")
+            body.append(f"- {it['title']} / {it['channel']} (https://youtu.be/{it['id']}) — {note}")
+        body.append("")
+    if not groups:
+        body.append("提案はありません。")
+    md_path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    out = {"version": 1, "generated_at": now.isoformat(timespec="seconds"), "groups": groups}
+    lines = ["{", f'  "version": 1,', f'  "generated_at": {json.dumps(out["generated_at"])},', '  "groups": [']
+    gs = [json.dumps(g, ensure_ascii=False, separators=(",", ":")) for g in groups]
+    lines += [f"    {g}{',' if n < len(gs) - 1 else ''}" for n, g in enumerate(gs)]
+    lines += ["  ]", "}"]
+    json_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def handles_of(state: dict) -> dict[str, str]:
     return {c: h["handle"] for c, h in (state.get("handles") or {}).items() if h.get("handle")}
 
@@ -188,7 +216,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     alive: dict[str, str] = {}   # 再生リストID -> 実際のタイトル
     playlists: list[dict] = []
     unsorted_add: set[str] = set()
-    suggestions: dict[str, list[str]] = {}
+    suggestions: dict[str, dict] = {}   # 提案先の key -> {"name", "id", "items": [...]}
 
     def resolve(pl: rules.PL) -> str | None:
         """再生リストIDを決める（名前では探さない）。"""
@@ -215,15 +243,8 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(text, encoding="utf-8")
             if not create_only:
-                sp = rp.with_name("suggestions.md")
-                body = [f"# 追加の提案 {now:%Y-%m-%d %H:%M} JST", "",
-                        "すでに別の再生リストに入っている曲や、お気に入りの曲の確認候補のうち、"
-                        "まだ入れていない（消してもいない）ものです。自動では追加しません。", ""]
-                for name, lines in sorted(suggestions.items()):
-                    body += [f"## {name}（{len(lines)}）"] + [f"- {x}" for x in lines] + [""]
-                if not suggestions:
-                    body.append("提案はありません。")
-                sp.write_text("\n".join(body) + "\n", encoding="utf-8")
+                write_suggestions(rp.with_name("suggestions.md"), data / "mix" / "suggestions.json",
+                                  suggestions, now)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write(text + "\n")
@@ -313,7 +334,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
 
         # 4. 「未仕分け」「その他の曲」にある監視外チャンネルの動画も情報を取得
         extra = []
-        for pl in fixed.values():
+        for k, pl in fixed.items():
+            if k == "rejected":
+                continue
             if (pid := resolve(pl)):
                 extra += [e["video_id"] for e in ledger.present(pid) if e["video_id"] not in catalog]
         for v in yt.videos(sorted(set(extra))):
@@ -356,7 +379,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         if pl.id and not pids[k]:
             rep.add("警告", f"「{pl.name}」の再生リストID {pl.id} が見つかりません")
 
-    managed = [p for k, p in pids.items() if p and k != "unsorted"]
+    managed = [p for k, p in pids.items() if p and k not in ("unsorted", "rejected")]
     auto_n, cand_n = {}, {}
     for tg in targets:
         for v in tg.auto:
@@ -451,29 +474,36 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             left = sum(1 for pl, v, _ in plan if ledger.status(pids.get(pl.key) or "", v) in ("pending", None))
             rep.add("警告", f"クォータ上限のため {left} 件を次回に持ち越します（台帳では pending）")
 
-    # 8b. ほかの再生リストへの追加の提案（自動では追加しない。reports/suggestions.md と レポートに出す）
+    # 8b. ほかの再生リストへの追加の提案（自動では追加しない）
     #   すでにどれかの管理対象の再生リストに入っている曲が、別の再生リストの確認候補に当たっているもの。
-    #   お気に入りの曲は、どこにも入っていない過去の確認候補も出す。入っていた（自分で消した）曲は出さない
+    #   お気に入りの曲は、どこにも入っていない過去の確認候補も出す。
+    #   出さないもの：提案先に入っている・入っていた（自分で消した）曲、「提案を却下」に入れた曲
+    rejected = {e["video_id"] for e in ledger.present(pids["rejected"])} if pids.get("rejected") else set()
     present_in: dict[str, list[str]] = {}
     for k, pid in pids.items():
-        if pid and k != "unsorted":
+        if pid and k not in ("unsorted", "rejected"):
             for e in ledger.present(pid):
                 present_in.setdefault(e["video_id"], []).append(alive.get(pid) or pid)
-    suggestions: dict[str, list[str]] = {}
+    suggestions = {}
     fresh = set(new_ids)
     for tg in targets:
         pid = pids.get(tg.pl.key)
         for vid in sorted(tg.cand - fresh, key=pub, reverse=True):
-            if pid and ledger.status(pid, vid) is not None:
+            if (pid and ledger.status(pid, vid) is not None) or vid in rejected:
                 continue
             where = [n for n in present_in.get(vid, []) if n != tg.pl.name]
             if not where and not tg.pl.key.startswith("song:"):
                 continue
-            note = f"理由: {tg.why.get(vid, '確認候補')}" + (f" / 今入っている: {'、'.join(where)}" if where else "")
-            suggestions.setdefault(tg.pl.name, []).append(f"{_label(catalog.get(vid), vid)} — {note}")
-    for name, lines in suggestions.items():
-        for line in lines:
-            rep.add("ほかの再生リストへの追加の提案（入れるなら手で追加するか include_video_ids へ）", f"{name} ← {line}")
+            v = catalog.get(vid) or {}
+            g = suggestions.setdefault(tg.pl.key, {"name": tg.pl.name, "id": pid, "items": []})
+            g["items"].append({"id": vid, "title": v.get("title"), "channel": v.get("channel_title"),
+                               "published_at": v.get("published_at"), "reason": tg.why.get(vid, "確認候補"),
+                               "in": where})
+    for g in suggestions.values():
+        for it in g["items"]:
+            note = f"理由: {it['reason']}" + (f" / 今入っている: {'、'.join(it['in'])}" if it["in"] else "")
+            rep.add("ほかの再生リストへの追加の提案（入れるなら手で追加するか include_video_ids へ）",
+                    f"{g['name']} ← {it['title']} / {it['channel']} (https://youtu.be/{it['id']}) — {note}")
 
     # 9. すでに再生リスト内にある重複（自動では消さず、レポートのみ）
     if cfg.section("dedupe")["enabled"]:

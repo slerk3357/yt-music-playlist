@@ -2,6 +2,7 @@
 
 export const MAX_VIDEOS = 50; // watch_videos に渡せる上限
 export const YTM_PACKAGE = "com.google.android.apps.youtube.music";
+export const YT_PACKAGE = "com.google.android.youtube";
 
 /** 0 以上 1 未満の乱数（暗号論的乱数）。テストでは差し替える。 */
 export function cryptoRandom() {
@@ -90,10 +91,15 @@ export function musicUrl({ v, list }, open = "watch") {
     : `https://music.youtube.com/watch?v=${encodeURIComponent(v)}&list=${encodeURIComponent(list)}`;
 }
 
-/** Android でブラウザが開いてしまう場合の intent:// 形式。 */
-export function intentUrl(target) {
+/** YouTube（アプリ）で一時リストを開く URL。 */
+export function youtubeUrl({ v, list }) {
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(v)}&list=${encodeURIComponent(list)}`;
+}
+
+/** Android でブラウザが開いてしまう場合の intent:// 形式。package を省くと YouTube Music。 */
+export function intentUrl(target, pkg = YTM_PACKAGE) {
   const rest = target.replace(/^https:\/\//, "");
-  return `intent://${rest}#Intent;scheme=https;package=${YTM_PACKAGE};end`;
+  return `intent://${rest}#Intent;scheme=https;package=${pkg};end`;
 }
 
 /** 文字列の比較（長さ以外の情報を漏らしにくい形）。 */

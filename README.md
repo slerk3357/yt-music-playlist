@@ -15,7 +15,7 @@ YouTubeの音楽再生リストを独自ルールで毎日自動仕分けし、�
 | 仮保存 | 判断が必要な新着曲を「未仕分け」に追加 |
 | 昇格 | 「その他の曲」のうち本家/カバーが5曲以上ある曲を「お気に入りの曲」にし、曲名の再生リストを作成 |
 | レポート | `reports/latest.md` と Actions の実行サマリーに結果を出力 |
-| 追加の提案 | すでに別の再生リストに入っている曲が、ほかの再生リストの確認候補にも当たっていれば、`reports/suggestions.md` に理由つきで一覧にする（自動では追加しない） |
+| 追加の提案 | すでに別の再生リストに入っている曲が、ほかの再生リストの確認候補にも当たっていれば、提案先ごとに理由つきで一覧にする（`reports/suggestions.md` と、ミックスAPIの「追加の提案」ページ。自動では追加しない） |
 | ミックス用の索引 | オリジナルミックスリスト用に、管理対象の再生リストの曲を `data/mix/index.json` に書き出す |
 
 **クォータ（1日10,000）が足りないときの優先順位**
@@ -120,7 +120,10 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 - 自動で昇格した曲は、`config.yaml` の `songs` の末尾に追加されます（`promoted_at` 付き）。取り消すときは、その曲を `songs` から消して `promotion.ignore` に曲名を追加します。
 - `playlist: {name: "…"}` のように id を書かずに再生リストを指定して main に push すると、数分後に作成され、id が `config.yaml` に書き込まれます（`git pull` で取り込んでください）。
 - 管理したくない再生リストは `ignore_playlists` に `{id, name}` で列挙します。新しく作った再生リストは、次の実行で自動的に `ignore_playlists` に「# 要確認」付きで追加されるので、管理したいものは正しい場所に移してください。
-- `reports/suggestions.md` には、ほかの再生リストにも入れたほうがよさそうな曲が、理由（名前だけの一致、曲名の部分一致、原曲の手がかりなし、判断が必要な再生リスト など）と、今入っている再生リストつきで並びます。
+- **追加の提案の確認:** ほかの再生リストにも入れたほうがよさそうな曲が、**提案先ごと**に、理由（名前だけの一致、曲名の部分一致、原曲の手がかりなし、判断が必要な再生リスト など）と今入っている再生リストつきで並びます。スマホでは、ミックスAPIのメニュー →「追加の提案」から、提案先ごとに YouTube アプリで開いて確かめられます（クォータは使いません）。
+  - **採用:** その曲を提案先の再生リストに保存します（次回から提案されません）。
+  - **却下:** その曲を「提案を却下」に保存します（次回から提案されません）。
+  - **未確認:** どちらにもしなければ、次回も提案されます。
 - YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、手元で `python -m ytpl.pull_config` を実行します。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
 
@@ -134,8 +137,9 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 | 完全ランダム | `/random` | 管理しているすべての再生リストの曲 |
 | ランダム再生リスト | `/playlists?k=3` | ランダムに選んだ k 個の再生リストの曲 |
 | 特にお気に入りのチャンネル | `/top/<name>` | その人の ○○チャンネル＋その他○○＋特別再生リストの曲 |
+| 追加の提案 | `/suggestions` | 提案先ごとの一覧。「○○への提案を YouTube で開く」で、その提案先への提案を一時リストとして開く（50曲ずつ） |
 
-- **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」と `ignore_playlists`、削除・非公開になった曲は含めません。
+- **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」「提案を却下」と `ignore_playlists`、削除・非公開になった曲は含めません。
 - **共通のオプション:** `n=50`（曲数。1〜50、既定は50）、`open=list`（曲一覧の画面を開く）、`app=intent`（Android でブラウザが開いてしまうとき）、`format=json`（リダイレクトせず選曲結果を表示）。
 - **選び直し:** リンクを開くたびに選び直します。同じ曲は1回だけです。
 
@@ -155,7 +159,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
    - プロジェクト名（Worker 名）: `yt-music-mix`（`worker/wrangler.toml` の `name` と同じにする必要があります）
    - ルートディレクトリ: `worker`
    - ビルドコマンド: 空欄、デプロイコマンド: `npx wrangler deploy`（既定のまま。デプロイの前に `build.mjs` が自動で動き、索引を組み込みます）
-3. Worker の Settings → Build → Build watch paths の Include paths を、`worker/*` と `data/mix/index.json` の2つにします。毎日の同期で索引が変わったときと、Worker のコードを変えたときだけビルドされます（1日1回程度。無料プランのビルド時間は月3,000分です）。
+3. Worker の Settings → Build → Build watch paths の Include paths を、`worker/*` と `data/mix/*` の2つにします。毎日の同期で索引が変わったときと、Worker のコードを変えたときだけビルドされます（1日1回程度。無料プランのビルド時間は月3,000分です）。
 
 **2. ログイン（Cloudflare Access）**
 1. Worker の **Access** タブ → Protect this Worker behind Access を選びます。

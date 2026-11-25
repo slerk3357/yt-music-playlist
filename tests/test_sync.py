@@ -259,7 +259,7 @@ def test_user_removed_from_unsorted_is_not_readded(tmp_path):
 
 def test_quota_carry_over(tmp_path):
     yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\npromotion:"))
-    yt.budget = 30 + 50 * 2 + 50 * 3       # 読み取り・再生リスト2つの作成・追加3件分
+    yt.budget = 30 + 50 * 3 + 50 * 3       # 読み取り・再生リスト3つの作成・追加3件分
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     pending = sum(1 for p in (tmp_path / "data/playlists").glob("*.yaml")
                   for e in load_yaml(p)["items"] if e["status"] == "pending")
@@ -321,7 +321,7 @@ def test_no_delete_api():
 def test_playlists_created_first_even_without_quota_for_reads(tmp_path):
     """読み取りでクォータが尽きても、再生リストの作成は先に終わっている。"""
     yt = setup(tmp_path)
-    yt.budget = 1 + 50 * 2                  # 一覧の取得と、再生リスト2つの作成だけ
+    yt.budget = 1 + 50 * 3                  # 一覧の取得と、再生リスト3つ（星の歌・キャロルとデイブ・提案を却下）の作成だけ
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     t = titles(yt)
     assert t["星の歌"] == [] and t["キャロルとデイブ"] == []
@@ -334,7 +334,7 @@ def test_create_only_and_no_duplicate(tmp_path):
     run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
     t = titles(yt)
     assert t["星の歌"] == [] and t["キャロルとデイブ"] == []      # 作成だけ。中身は追加しない
-    assert yt.used == 1 + 50 * 2
+    assert yt.used == 1 + 50 * 3            # 星の歌・キャロルとデイブ・提案を却下
     # config.yaml への書き戻しが失われた（push失敗など）場合でも、二重に作らない
     (tmp_path / "config.yaml").write_text(CONFIG, encoding="utf-8")
     run(yt=yt, now=day(1, 10), create_only=True, **kw(tmp_path))
@@ -371,7 +371,7 @@ def test_reserve_defers_new_channel_and_unknown_playlists(tmp_path):
         "occasional:", f'occasional:\n  - name: "エド"\n    channels: [{{id: "{C("ed")}", name: "エド"}}]')
     (tmp_path / "config.yaml").write_text(cfg, encoding="utf-8")
     yt.v["e1"] = V("e1", "エドの曲", C("ed"), "01-01")
-    yt.used, yt.budget = 0, 2000 + 9           # 一覧1＋管理対象8件のバックアップ分だけ予約枠の外
+    yt.used, yt.budget = 0, 2000 + 10          # 一覧1＋管理対象9件のバックアップ分だけ予約枠の外
     text = run(yt=yt, now=day(2, 10), **kw(tmp_path))
     assert "次回以降に取り込むチャンネル" in text and "エド" in text
     # 未知の再生リストは ignore_playlists に記録され、バックアップの対象にしない
@@ -494,13 +494,45 @@ def test_suggestions_for_other_playlists(tmp_path):
     # b1（ボブの曲＝ボブチャンネルの確認候補）は、すでに「夜の曲」に入っている
     run(yt=yt, now=day(1, 11), **kw(tmp_path))
     sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
-    assert "## その他アリス" in sug and "朝の曲 / キャロル" in sug and "名前（aliases）だけの一致" in sug
+    assert "## 提案先: その他アリス" in sug and "朝の曲 / キャロル" in sug and "名前（aliases）だけの一致" in sug
     assert "今入っている: その他の曲" in sug
-    assert "## ボブチャンネル" in sug and "【cover】夜の曲 / ボブ" in sug and "今入っている: 夜の曲" in sug
+    assert "## 提案先: ボブチャンネル" in sug and "【cover】夜の曲 / ボブ" in sug and "今入っている: 夜の曲" in sug
     # 提案した曲を自分で入れて、また消した場合は、もう提案しない
     yt.pl["PLaliceOther"]["items"].append("c3")
     run(yt=yt, now=day(1, 12), **kw(tmp_path))
     yt.pl["PLaliceOther"]["items"].remove("c3")
     run(yt=yt, now=day(1, 13), **kw(tmp_path))
     sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
-    assert "朝の曲 / キャロル" not in sug.split("## その他アリス")[-1].split("##")[0] if "## その他アリス" in sug else True
+    assert "朝の曲 / キャロル" not in sug.split("## 提案先: その他アリス")[-1].split("##")[0] if "## 提案先: その他アリス" in sug else True
+
+
+def test_suggestions_json(tmp_path):
+    import json
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    yt.pl["PLmisc"]["items"].append("c3")
+    run(yt=yt, now=day(1, 11), **kw(tmp_path))
+    data = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))
+    g = {x["name"]: x for x in data["groups"]}
+    assert g["その他アリス"]["id"] == "PLaliceOther"
+    item = g["その他アリス"]["items"][0]
+    assert item["id"] == "c3" and item["in"] == ["その他の曲"] and "名前" in item["reason"]
+
+
+def test_rejected_suggestions_are_not_suggested_again(tmp_path):
+    """「提案を却下」に入れた曲は提案しない（未確認の提案とは区別できる）。"""
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    rej = next(k for k, p in yt.pl.items() if p["title"] == "提案を却下")      # 自動で作られている
+    yt.pl["PLmisc"]["items"].append("c3")
+    run(yt=yt, now=day(1, 11), **kw(tmp_path))
+    sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    assert "朝の曲 / キャロル" in sug and "【cover】夜の曲 / ボブ" in sug
+    yt.pl[rej]["items"].append("c3")                                          # c3 の提案を却下
+    run(yt=yt, now=day(1, 12), **kw(tmp_path))
+    sug = (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    assert "朝の曲 / キャロル" not in sug and "【cover】夜の曲 / ボブ" in sug   # b1 は未確認のまま残る
+    assert titles(yt)["提案を却下"] == ["c3"]                                  # システムは追加しない
+    import json
+    idx = json.loads((tmp_path / "data/mix/index.json").read_text(encoding="utf-8"))
+    assert "提案を却下" not in {p["name"] for p in idx["playlists"]}

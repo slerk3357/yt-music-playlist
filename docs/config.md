@@ -50,6 +50,7 @@
 | `quota.write_reserve` | 数値 | `2000` | 書き込み（曲の追加）のために残しておく量。新しく追加したチャンネルの全件取得と検索は、残りがこの量を下回りそうなら次回に回します。 |
 | `playlists.unsorted` | 再生リスト | `{name: "未仕分け"}` | 「未仕分け」。システムは**追加だけ**を行い、削除は一切しません。 |
 | `playlists.misc` | 再生リスト | `{name: "その他の曲"}` | 「その他の曲」。自分で振り分ける再生リストで、システムは追加しません（昇格の判定に使うだけ）。 |
+| `playlists.rejected` | 再生リスト | `{name: "提案を却下"}` | 「提案を却下」。追加の提案を却下するとき、その曲を自分で入れる再生リストです。ここにある曲は二度と提案しません。システムは読むだけで、追加も削除もしません。ミックスにも使いません。 |
 | `music.categories` | 文字列リスト | `["10"]` | 曲とみなす YouTube カテゴリID（10 = 音楽）。 |
 | `music.include_keywords` | 文字列リスト | `[]` | カテゴリが違っても、タイトルにこの語があれば曲とみなす。 |
 | `music.exclude_keywords` | 文字列リスト | `[]` | タイトルにこの語があれば曲とみなさない。 |
@@ -325,6 +326,7 @@ TOPIC チャンネル（「○○ - Topic」）などでは、アップロード
 | `data/catalog/*.yaml` | 監視チャンネルの動画情報 |
 | `data/state.yaml` | @ハンドルのキャッシュ、最終実行日時など |
 | `data/mix/index.json` | オリジナルミックスリスト用の索引（管理対象の再生リストの曲。「未仕分け」と `ignore_playlists` は除く）。Cloudflare Worker がビルド時に組み込む |
+| `data/mix/suggestions.json` | 追加の提案（提案先ごと）。Cloudflare Worker がビルド時に組み込み、「追加の提案」ページに使う |
 | `reports/latest.md` | 最新の実行レポート |
 | `reports/suggestions.md` | ほかの再生リストへの追加の提案（理由と、今入っている再生リストつき） |
 | `reports/latest-create.md` | `config.yaml` の push で行った、作成だけの実行のレポート |

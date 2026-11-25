@@ -169,3 +169,45 @@ test("ALLOWED_EMAILS が空なら Access の認証だけで使える", async () 
   const res = await worker.fetch(new Request("https://mix.example/random"), {}, CTX);
   assert.equal(res.status, 302);
 });
+
+// ---- 追加の提案 ----
+const SUG = {
+  version: 1,
+  generated_at: "2026-11-25T04:00:00+09:00",
+  groups: [
+    { name: "その他A", id: "PLother", items: Array.from({ length: 60 }, (_, i) => ({
+      id: `s${i}`, title: `曲${i}`, channel: "B", reason: "名前（aliases）だけの一致", in: ["その他の曲"] })) },
+    { name: "曲X", id: null, items: [{ id: "x1", title: "曲X / C", channel: "C", reason: "曲名の部分一致", in: [] }] },
+  ],
+};
+
+test("提案ページに提案先ごとの一覧と開くボタンがある", async () => {
+  setupWorld();
+  const w = createHandler(INDEX_DATA, SUG);
+  const html = await (await w.fetch(new Request("https://mix.example/suggestions"), ENV, CTX)).text();
+  assert.match(html, /提案先: その他A（60 曲）/);
+  assert.match(html, /「その他A」への提案を YouTube で開く/);
+  assert.match(html, /提案先: <b>曲X<\/b>/);
+  assert.match(html, /提案を却下/);
+  assert.match(html, /href="\/suggestions\/0\?p=0"/);
+  assert.match(html, /href="\/suggestions\/0\?p=1"/);            // 60曲 → 50曲ずつ2つ
+  assert.match(html, /list=PLother/);
+  assert.match(html, /今入っている: その他の曲/);
+  const menu = await (await w.fetch(new Request("https://mix.example/"), ENV, CTX)).text();
+  assert.match(menu, /href="\/suggestions"/);
+});
+
+test("提案を YouTube の一時リストで開く（50曲ずつ）", async () => {
+  const calls = setupWorld({ location: "https://www.youtube.com/watch?v=s50&list=TLGGsug" });
+  const w = createHandler(INDEX_DATA, SUG);
+  const res = await w.fetch(new Request("https://mix.example/suggestions/0?p=1"), ENV, CTX);
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get("location"), "https://www.youtube.com/watch?v=s50&list=TLGGsug");
+  const wv = calls.find((c) => c.url.includes("watch_videos"));
+  assert.equal(new URL(wv.url).searchParams.get("video_ids").split(",").length, 10);   // 51〜60曲目
+  const music = await w.fetch(new Request("https://mix.example/suggestions/1?to=music"), ENV, CTX);
+  assert.match(music.headers.get("location"), /^https:\/\/music\.youtube\.com\/watch/);
+  const intent = await w.fetch(new Request("https://mix.example/suggestions/1?app=intent"), ENV, CTX);
+  assert.match(intent.headers.get("location"), /package=com\.google\.android\.youtube;end$/);
+  assert.equal((await w.fetch(new Request("https://mix.example/suggestions/9"), ENV, CTX)).status, 404);
+});

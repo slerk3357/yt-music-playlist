@@ -12,17 +12,18 @@ from pathlib import Path
 from . import rules
 from .store import Config, Ledger
 
-KIND = {"unsorted": "unsorted", "misc": "misc", "own": "channel", "other": "other", "special": "special",
+KIND = {"unsorted": "unsorted", "misc": "misc", "rejected": "rejected", "own": "channel", "other": "other", "special": "special",
         "song": "song"}
 
 
 def build(cfg: Config, ledger: Ledger, generated_at: str) -> dict:
     ignored = rules.ignored_playlist_ids(cfg)
-    unsorted_id = rules.fixed_playlists(cfg)["unsorted"].id
+    fixed = rules.fixed_playlists(cfg)
+    excluded = {fixed["unsorted"].id, fixed["rejected"].id} - {None}   # 未仕分け・提案を却下はミックスに使わない
     playlists, included = [], set()
     for pl in rules.declared_playlists(cfg):
         pid = pl.id
-        if not pid or pid in ignored or pid == unsorted_id or pid in included:
+        if not pid or pid in ignored or pid in excluded or pid in included:
             continue
         doc = ledger.docs.get(pid)
         if not doc or doc.get("deleted_since"):
