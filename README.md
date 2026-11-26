@@ -126,7 +126,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 - チャンネルや曲を増やすときは `config.yaml` を編集してコミットします（コミット前に自動で整合性を確認します）。新しく追加したチャンネルは、過去の動画もまとめて取り込みます（ただし「未仕分け」には入れません）。
 - 自動で昇格した曲は、`config.yaml` の `songs` の末尾に追加されます（`promoted_at` 付き）。取り消すときは、その曲を `songs` から消して `promotion.ignore` に曲名を追加します。
 - `playlist: {name: "…"}` のように id を書かずに再生リストを指定して main に push すると、数分後に作成され、id が `config.yaml` に書き込まれます（`git pull` で取り込んでください）。
-- 管理したくない再生リストは `ignore_playlists` に `{id, name}` で列挙します。新しく作った再生リストは、次の実行で自動的に `ignore_playlists` に「# 要確認」付きで追加されるので、管理したいものは正しい場所に移してください。
+- 管理したくない再生リストは `ignore_playlists` に `{id, name}` で列挙します。新しく作った再生リストは、次の実行で自動的に `ignore_playlists` に「# 要確認」付きで追加されるので、管理したいものは正しい場所に移してください。「# 要確認」の付いたチャンネル・再生リストは、ミックスAPIのメニュー →「要確認」でも一覧できます（確認が済んだら、`config.yaml` のコメントを消すと一覧から消えます）。
 - **追加の提案の確認:** ミックスAPIのメニュー →「追加の提案」を開くと、ほかの再生リストにも入れたほうがよさそうな曲が、**提案先ごと**に、理由（名前だけの一致、曲名の部分一致、原曲の手がかりなし、判断が必要な再生リスト など）と今入っている再生リストつきで並びます。
   - **▶（サムネイル）:** その場で動画を再生して確かめられます（埋め込みの再生が許可されていない動画は、タイトルのリンクから YouTube で開きます）。
   - **追加:** 次回の同期（毎朝）で、提案先の再生リストに入ります。反映されると「追加済み」になります。
@@ -134,7 +134,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
   - **却下:** その提案先には、もう提案しません。
   - **取り消し:** 反映前の「追加」と「却下」は取り消せます（反映済みの追加は、このシステムでは再生リストから消せないので、YouTube 上で消してください）。
   - **どちらも選ばない:** 次回も提案されます。「まとめて YouTube で開く」では、まだ決めていない曲を一時リストで続けて聴けます（クォータは使いません）。
-  - 決めた内容は Worker（Durable Object）に保存され、同期のたびに `data/decisions.yaml` にも記録されます（git に残るので、Worker 側のデータが消えても却下は守られます）。
+  - 決めた内容は Worker のデータベース（Cloudflare D1）に保存され、同期のたびに `data/decisions.yaml` にも記録されます（git に残るので、Worker 側のデータが消えても却下は守られます）。
 - YouTube上で再生リストの名前を変えたり、新しく作ったりしたときは、Actions →「playlist-tools」で `pull_config` を実行します（まず dry_run のまま内容を確認し、外して実行するとコミットされます）。`config.yaml` の再生リスト名が今のタイトルに更新され、未登録の再生リストは `ignore_playlists` に「# 要確認」付きで追加されます（詳しくは [docs/config.md](docs/config.md)）。
 - 誤判定は各ルールの `exclude_video_ids` / `include_video_ids`、全体なら `ignore_video_ids` で直せます。
 
@@ -149,6 +149,7 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 | ランダム再生リスト | `/playlists?k=3` | ランダムに選んだ k 個の再生リストの曲 |
 | 特にお気に入りのチャンネル | `/top/<name>` | その人の ○○チャンネル＋その他○○＋特別再生リストの曲 |
 | 手で追加してほしい曲 | `/hand` | クォータが足りない日に、手で再生リストに保存してほしい曲。手順と、50曲ずつ YouTube アプリで開くボタン |
+| 要確認 | `/review` | `config.yaml` で「# 要確認」が付いているチャンネルと再生リスト（自動で `ignore_channels` / `ignore_playlists` に入れたもの）の一覧と、確認後にすること |
 | 追加の提案 | `/suggestions` | 提案先ごとの一覧。曲ごとに再生して「追加」「却下」を選ぶ。「まとめて YouTube で開く」で、まだ決めていない曲を一時リストとして開く（50曲ずつ） |
 
 - **対象:** `config.yaml` で管理している再生リストの曲です。「未仕分け」と `ignore_playlists`、削除・非公開になった曲は含めません。
@@ -156,51 +157,66 @@ git config core.hooksPath .githooks   # 以後、config.yaml をコミットす�
 - **選び直し:** リンクを開くたびに選び直します。同じ曲は1回だけです。
 
 **しくみ**
-1. 毎日の同期が、ミックス用の索引 `data/mix/index.json` を非公開リポジトリに書き出します。
-2. Cloudflare がその commit を検知して Worker（`worker/`）をビルドし直し、索引を Worker に組み込みます（`worker/build.mjs`）。Cloudflare のビルドはリポジトリを丸ごと取得するので、**GitHub のトークンは不要**です。
+1. 毎日の同期が、ミックス用の索引 `data/mix/index.json`（と追加の提案・要確認の一覧）を非公開リポジトリに書き出します。
+2. 同期が終わると、GitHub Actions の「deploy-worker」が Worker（`worker/`、[Void](https://void.cloud/) フレームワーク）をビルドし、索引を組み込んで `void deploy` で Cloudflare にデプロイします。`worker/` や `data/mix/` を push したときと、手動実行でも動きます。
 3. リンクを開くと、選んだ曲で `watch_videos` を呼んで一時リスト（`TLGG…`）を作り、`music.youtube.com` へ HTTP 302 でリダイレクトします。
 4. Worker は Cloudflare Access で保護し、自分の Cloudflare アカウントでログインしたときだけ使えます。Worker 側でも、Access で認証されていないリクエストは拒否します。
+5. 「追加の提案」で選んだ決定は、Void が用意する D1 データベース（`worker/db/schema.ts`）に保存されます。初回のデプロイで自動的に作られます。
 
-### セットアップ（Cloudflare のダッシュボードで操作。手元に wrangler は不要）
+### セットアップ
 
-画面の名前は変わることがあります。見つからないときは、Cloudflare のドキュメント（Workers Builds、Cloudflare Access）を参照してください。
+画面の名前は変わることがあります。見つからないときは、Cloudflare のドキュメント（API トークン、Cloudflare Access）を参照してください。
 
-**1. Worker を作ってリポジトリを接続（自動デプロイ）**
-1. Cloudflare ダッシュボードの Workers & Pages → 作成 → リポジトリをインポート（Import a repository）を選びます。GitHub と連携し、**非公開リポジトリ**を選びます。
-2. 設定は次のとおりにします。
-   - プロジェクト名（Worker 名）: `yt-music-mix`（`worker/wrangler.toml` の `name` と同じにする必要があります）
-   - ルートディレクトリ: `worker`
-   - ビルドコマンド: 空欄、デプロイコマンド: `npx wrangler deploy`（既定のまま。デプロイの前に `build.mjs` が自動で動き、索引を組み込みます）
-3. Worker の Settings → Build → Build watch paths の Include paths を、`worker/*` と `data/mix/*` の2つにします。毎日の同期で索引が変わったときと、Worker のコードを変えたときだけビルドされます（1日1回程度。無料プランのビルド時間は月3,000分です）。
+**1. デプロイ用の API トークン（GitHub Actions から `void deploy`）**
+1. Cloudflare ダッシュボード → My Profile → API Tokens → Create Token → Custom token で、次の権限のトークンを作ります。
+   - Account → **Workers Scripts: Edit**（Workers Admin 相当。初回に Worker を作るため）
+   - Account → **D1: Edit**（決定の保存先を作り、マイグレーションを適用するため）
+   - Account → **Account Settings: Read**（アカウントと workers.dev のサブドメインを調べるため）
+   - Account Resources は自分のアカウントだけにします。有効期限は任意です（期限付きにしたら、切れる前に作り直して Secret を更新）。
+2. 非公開リポジトリの Settings → Secrets and variables → Actions に登録します。
+
+| 種類 | 名前 | 値 |
+|---|---|---|
+| Secret | `CLOUDFLARE_API_TOKEN` | 上で作ったトークン |
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | アカウント ID（トークンが複数のアカウントを使えるときだけ必須） |
+| Variable | `CLOUDFLARE_WORKERS_SUBDOMAIN` | workers.dev のサブドメイン（例 `my-team`）。デプロイが「readiness URL がない」と止まるときだけ |
+
+3. Actions →「deploy-worker」→「Run workflow」で初回のデプロイをします。Worker `yt-music-playlist-mix` と D1 データベースが作られ、その情報が `worker/void.lock.json` に書かれて自動で commit されます（**このファイルは消さないでください**。消すと次のデプロイで別のデータベースが作られます）。
+   - 2.（Access）を先に済ませている場合、デプロイ後の起動確認に、3.のサービストークン（`CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`）を使います。初回は Access の設定前でも構いません。
+4. 以降は、毎日の同期のあとに自動でデプロイされます。
 
 **2. ログイン（Cloudflare Access）**
-1. Worker の **Access** タブ → Protect this Worker behind Access を選びます。
+1. Workers & Pages → `yt-music-playlist-mix` → Settings → Domains & Routes で workers.dev の **Access** を有効にします（Protect this Worker behind Access）。
 2. 範囲は **All traffic**（workers.dev の URL もプレビュー用の URL も、すべてログインが必要になります）、ポリシーは **Cloudflare account**（このアカウントのメンバーだけ）を選び、適用します。
 3. ログイン方法は Cloudflare アカウントです。2026年6月以降に作った Zero Trust の組織では、最初から使えます。それより前に作った組織では、Zero Trust → Integrations → Identity providers で「Cloudflare」を追加してください。
 4. セッションの有効期間は長め（例：1か月）にすると、毎回ログインせずに済みます。
-5. スマホで `https://yt-music-mix.<あなたのサブドメイン>.workers.dev/` を開き、Cloudflare アカウントでログインしてから、ホーム画面に追加します。
+5. スマホで `https://yt-music-playlist-mix.<あなたのサブドメイン>.workers.dev/` を開き、Cloudflare アカウントでログインしてから、ホーム画面に追加します。
 
 **3. 追加の提案の決定を、毎日の同期に渡す**
 
-「追加の提案」の画面で選んだ「追加」「却下」は、Worker の Durable Object（SQLite 方式。無料プランで使えます）に保存されます。保存先は `worker/wrangler.toml` に書いてあるので、デプロイすると自動で作られます。毎日の同期（GitHub Actions）がそれを読めるように、次を設定します。
-1. **サービストークン:** Zero Trust → Access controls → Service credentials → Service Tokens で、サービストークンを作ります（名前は例えば `yt-playlist-sync`）。期間（Service Token Duration）は **Non-expiring（無期限）** を選べます。期限付きにした場合は、切れる前に Cloudflare 側で延長してください。表示される Client ID と Client Secret を控えます（Secret は作ったときにしか表示されません）。漏れたときは、その場で失効させるか Secret を作り直します。このトークンで使えるのは同期用 API だけで、画面や「追加」「却下」の送信には使えません。
+毎日の同期（GitHub Actions）が D1 に保存された決定を読めるように、次を設定します。
+1. **サービストークン:** Zero Trust → Access controls → Service credentials → Service Tokens で、サービストークンを作ります（名前は例えば `yt-playlist-sync`）。期間（Service Token Duration）は **Non-expiring（無期限）** を選べます。期限付きにした場合は、切れる前に Cloudflare 側で延長してください。表示される Client ID と Client Secret を控えます（Secret は作ったときにしか表示されません）。漏れたときは、その場で失効させるか Secret を作り直します。このトークンで使えるのは同期用 API（とデプロイ後の起動確認）だけで、画面や「追加」「却下」の送信には使えません。
 2. **Access のポリシーを追加:** Worker の Access の設定（アプリケーション）を開き、ポリシーを1つ追加します。**Action は Service Auth**、Include に **Service Token** でさっきのトークンを選びます。ふだんのログイン用のポリシーはそのまま残します。
-3. **Worker の変数:** Worker の Settings → Variables and Secrets に、**変数** `SYNC_CLIENT_ID` としてサービストークンの **Client ID** を登録します（秘密の値ではありません）。Worker は、Access が通したリクエストのうち、このトークンで来たものだけを同期用 API に通します。ログインした人のブラウザからは同期用 API を使えません。
+3. **Worker のシークレット:** Workers & Pages → `yt-music-playlist-mix` → Settings → Variables and Secrets に、`SYNC_CLIENT_ID` としてサービストークンの **Client ID** を登録します（種類は Secret にしてください。`void deploy` はダッシュボードのシークレットを消しません。手元からなら `cd worker && npx void secret put SYNC_CLIENT_ID`）。Worker は、Access が通したリクエストのうち、このトークンで来たものだけを同期用 API に通します。ログインした人のブラウザからは同期用 API を使えません。
 4. **GitHub の Secrets（非公開リポジトリ）:** 次の3つを登録します。
 
 | 名前 | 値 |
 |---|---|
-| `MIX_WORKER_URL` | Worker の URL（例 `https://yt-music-mix.<サブドメイン>.workers.dev`） |
+| `MIX_WORKER_URL` | Worker の URL（例 `https://yt-music-playlist-mix.<サブドメイン>.workers.dev`） |
 | `CF_ACCESS_CLIENT_ID` | サービストークンの Client ID |
 | `CF_ACCESS_CLIENT_SECRET` | サービストークンの Client Secret |
 
 設定しなくても同期は動きます（その場合、画面で選んだ決定は反映されず、レポートにも警告は出ません）。設定したのに読めないときは、同期のレポートに「追加の提案の決定を Worker から読めませんでした」と出ます。
 
-**4. （任意）変数とシークレット**
-Worker の Settings → Variables and Secrets で、必要なら次を**シークレット**として追加します。
+**4. （任意）シークレット**
+同じ画面（または `npx void secret put`）で、必要なら次を**シークレット**として追加します。
 | 名前 | 値 |
 |---|---|
 | `ALLOWED_EMAILS` | 使うアカウントのメールアドレス（複数ならカンマ区切り）。Access のポリシーに加えて、Worker 側でも本人か確かめます |
+
+**以前の Worker（`yt-music-mix`、Workers Builds で自動ビルド）から移るとき**
+1. 上の 1.〜3. で新しい Worker を用意し、`MIX_WORKER_URL` を新しい URL に変えます。古い Worker に残っていた「追加」「却下」で未反映のものは、先に一度同期を走らせて反映しておくと確実です（反映済みの決定は `data/decisions.yaml` に残っているので、新しい Worker に移さなくても、却下した曲が再び提案されることはありません）。
+2. 古い Worker の Settings → Build で Git リポジトリとの接続を外し、Worker（`yt-music-mix`）を削除します。古い Access のアプリケーションも不要になります（サービストークンは新しい方で使い回せます）。
 
 **注意**
 - **ログイン後のアプリ起動:** ログイン画面を経由した直後は、YouTube Music アプリではなくブラウザで開くことがあります。2回目以降（ログイン済み）は、そのままアプリが開きます。ブラウザで開いてしまう場合は `?app=intent` を付けてください。
@@ -208,8 +224,8 @@ Worker の Settings → Variables and Secrets で、必要なら次を**シー�
 - **一時リスト:** 時間がたつと使えなくなるので、保存用ではなく「今聴く」用です。残したいときは、YouTube Music の再生画面の「保存」から再生リストに保存できます。
 - **非公式の仕組み:** `watch_videos` は YouTube の公式APIではないので、仕様が変わると動かなくなる可能性があります。一時リストを作れなかったときは、`watch_videos` の URL を直接開きます（YouTube のアプリかブラウザで再生されます）。
 - **再生できない曲:** YouTube Music で再生できない動画は、リストの中でグレー表示になるか、飛ばされます。
-- **索引の反映:** 毎日の同期のあと、Cloudflare のビルドが終わる（数分）と新しい曲が選ばれるようになります。メニューに索引の日時が出ます。
-- **テスト:** `cd worker && npm test`（Node.js だけで動きます）
+- **索引の反映:** 毎日の同期のあと、「deploy-worker」が終わる（数分）と新しい曲が選ばれるようになります。メニューに索引の日時が出ます。
+- **手元での確認:** Node.js 24.22 以上で `cd worker && npm ci && npm test`。`npm run dev` で手元のサーバーが立ちます（Access がないので、画面はすべて 403 になります）。決定の保存先の形（`worker/db/schema.ts`）を変えたら `npm run db:generate` でマイグレーションを作って commit します。
 
 ## バックアップと復元
 `data/playlists/*.yaml` の各曲には `status` が付きます。

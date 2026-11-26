@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1795716380967,
+      "tag": "20261126180620_brainy_slapstick",
+      "breakpoints": true
+    }
+  ]
+}

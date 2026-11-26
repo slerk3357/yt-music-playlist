@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   clampCount, intentUrl, musicUrl, parseWatchRedirect, pickMix, safeEqual, sample, watchVideosUrl,
 } from "../src/mix.js";
-import { createHandler } from "../src/index.js";
+import { ROUTE_TABLE, createHandler } from "./harness.js";
 
 // 決まった順に値を返す乱数
 function seq(...values) {
@@ -148,16 +148,19 @@ test("メニューに各ミックスへのリンクがある", async () => {
 });
 
 
-test("ビルド時の組み込みと入口（build.mjs → entry.js）", async () => {
-  const { execFileSync } = await import("node:child_process");
-  const { fileURLToPath } = await import("node:url");
-  const dir = fileURLToPath(new URL("..", import.meta.url));
-  const out = execFileSync(process.execPath, ["build.mjs"], { cwd: dir, encoding: "utf8" });
-  assert.match(out, /索引を組み込みました/);
-  const entry = (await import("../src/entry.js")).default;
-  setupWorld();
-  const res = await entry.fetch(new Request("https://mix.example/"), ENV, CTX);
-  assert.equal(res.status, 200);
+test("ビルド時の組み込み（embed-data.mjs）：data/mix/ がなければ空のデータ", async () => {
+  const { embedData } = await import("../embed-data.mjs");
+  const out = embedData({ quiet: true });
+  for (const k of ["index.json", "suggestions.json", "review.json"]) assert.ok(out[k] && out[k].version === 1, k);
+});
+
+test("ルートのファイル構成（Void の routes/）", () => {
+  const paths = ROUTE_TABLE.map((r) => `${Object.keys(r.module).filter((k) => k === k.toUpperCase()).join(",")} ${r.path}`).sort();
+  assert.deepEqual(paths, [
+    "GET /", "GET /hand", "GET /hand/:n", "GET /playlists", "GET /random", "GET /review",
+    "GET /suggestions", "GET /suggestions/:n", "GET /top/:name",
+    "GET /api/sync/decisions", "POST /api/decide", "POST /api/sync/ack",
+  ].sort());
 });
 
 test("ALLOWED_EMAILS が空なら Access の認証だけで使える", async () => {
@@ -184,7 +187,7 @@ test("提案ページに提案先ごとの一覧と開くボタンがある", as
   assert.match(html, /提案先: その他A（60 曲）/);
   assert.match(html, /まとめて YouTube で開く/);
   assert.match(html, /提案先: 曲X（1 曲）/);
-  assert.match(html, /決定の保存先（Durable Object）が設定されていない/);   // DECISIONS がなければボタンは出さない
+  assert.match(html, /決定の保存先（D1）が使えないため/);   // 保存先がなければボタンは出さない
   assert.doesNotMatch(html, /class="act add"/);
   assert.match(html, /href="\/suggestions\/0\?p=0"/);
   assert.match(html, /href="\/suggestions\/0\?p=1"/);            // 60曲 → 50曲ずつ2つ
@@ -210,18 +213,13 @@ test("提案を YouTube の一時リストで開く（50曲ずつ）", async () 
 });
 
 // ---- 追加・却下の決定（Durable Object の代わりに Map を使う） ----
-import { DecisionLog, stateLabel } from "../src/decisions.js";
+import { DecisionLog, memoryRepo, stateLabel } from "../src/decisions.js";
 
 function fakeNamespace() {
-  const map = new Map();
-  const storage = {
-    async get(k) { return structuredClone(map.get(k)); },
-    async put(k, v) { map.set(k, structuredClone(v)); },
-    async list({ prefix }) { return new Map([...map].filter(([k]) => k.startsWith(prefix)).sort()); },
-  };
+  const repo = memoryRepo();
   let t = 0;
-  const log = new DecisionLog(storage, () => `2026-11-25T00:00:${String(t++).padStart(2, "0")}Z`);
-  return { map, idFromName: (n) => n, get: () => log };
+  const log = new DecisionLog(repo, () => `2026-11-25T00:00:${String(t++).padStart(2, "0")}Z`);
+  return { map: repo.map, idFromName: (n) => n, get: () => log };
 }
 
 const VID = (n) => `vid${String(n).padStart(8, "0")}`;     // 11文字の動画ID
@@ -390,4 +388,21 @@ test("手で追加してほしい曲：メニューのお知らせ・手順・Yo
   // ないときはお知らせを出さない
   const plain = await (await createHandler(INDEX_DATA, SUG2).fetch(new Request("https://mix.example/"), ENV, CTX)).text();
   assert.doesNotMatch(plain, /class="notice"/);
+});
+
+test("要確認：メニューのお知らせと一覧（チャンネル・再生リスト）", async () => {
+  setupWorld();
+  const review = { version: 1, generated_at: "2026-11-27T04:17:00+09:00", items: [
+    { kind: "channel", section: "ignore_channels", id: "UCxxxxxxxxxxxxxxxxxxxxxx", name: "新しい人", note: "2026-11-27 自動追加：「その他の曲」の「曲」" },
+    { kind: "playlist", section: "ignore_playlists", id: "PLyyyy", name: "作業用 <BGM>", note: "2026-11-27 自動追加" }] };
+  const w = createHandler(INDEX_DATA, SUG2, review);
+  const menuHtml = await (await w.fetch(new Request("https://mix.example/"), ENV, CTX)).text();
+  assert.match(menuHtml, /要確認の項目が 2 件あります/);
+  const html = await (await w.fetch(new Request("https://mix.example/review"), ENV, CTX)).text();
+  assert.match(html, /チャンネル（ignore_channels）（1 件）/);
+  assert.match(html, /href="https:\/\/www\.youtube\.com\/channel\/UCxxxxxxxxxxxxxxxxxxxxxx"/);
+  assert.match(html, /作業用 &lt;BGM&gt;/);                       // エスケープする
+  assert.match(html, /「# 要確認…」のコメントを消します/);
+  const none = await (await createHandler(INDEX_DATA, SUG2).fetch(new Request("https://mix.example/review"), ENV, CTX)).text();
+  assert.match(none, /要確認の項目はありません/);
 });

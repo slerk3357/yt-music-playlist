@@ -1,13 +1,13 @@
 """追加の提案に対する決定（Worker の画面で選んだ「追加」「却下」）の取得と、反映結果の送信。
 
-Worker（worker/）の Durable Object に保存された決定を、毎日の同期の最初に読み、
+Worker（worker/）の D1 データベースに保存された決定を、毎日の同期の最初に読み、
 「追加」は再生リストに入れ、「却下」はその提案先に二度と提案しない。結果は Worker に返す（ack）。
 
 Worker が使えないとき（設定していない・つながらない）は、手元の記録 data/decisions.yaml だけで動く。
 手元の記録は git に残るので、Worker 側のデータが消えても却下の記録は失われない。
 
 環境変数（GitHub の Secrets）
-  MIX_WORKER_URL          Worker の URL（例 https://yt-music-mix.<サブドメイン>.workers.dev）
+  MIX_WORKER_URL          Worker の URL（例 https://yt-music-playlist-mix.<サブドメイン>.workers.dev）
   CF_ACCESS_CLIENT_ID     Cloudflare Access のサービストークン（Cloudflare が発行・失効・更新を管理する）
   CF_ACCESS_CLIENT_SECRET
 """
