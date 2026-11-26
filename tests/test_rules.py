@@ -504,3 +504,36 @@ songs:
     t, _ = targets(cfg, vs, {})
     assert t["KAZE"].auto == {"c4"} and t["KAZE"].cand == {"c3"}
     assert t["SORA"].cand == {"s1"}
+
+
+def test_official_channel_names_as_original_artists(tmp_path):
+    """official_channels のチャンネル名（「Official」などを除いたもの）も原曲のアーティスト名として使う。
+    英数字の名前は単語の途中には一致させない。2文字以下の名前は自動では使わない。"""
+    A, B, D, O, S = C("a"), C("b"), C("d"), C("official"), C("short")
+    cfg = cfg_of(tmp_path, f"""
+favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}]
+  - name: "B"
+    channels: [{{id: "{B}", name: "B"}}]
+  - name: "D"
+    channels: [{{id: "{D}", name: "D"}}]
+songs:
+  - name: "SORA"
+    official_channels: [{{id: "{O}", name: "Zeta Official"}}]
+  - name: "UMI"
+    original_artists: ["Ado"]
+  - name: "MORI"
+    official_channels: [{{id: "{S}", name: "AB"}}]
+""")
+    vs = [V("s1", "SORA / zeta (cover) A", A),               # 公式チャンネル名（Official を除く）→ 手がかりあり
+          V("s2", "SORA (cover) B", B, ch_title="B"),         # 手がかりなし（同じ人の重複除去を避けるため別チャンネル）
+          V("s3", "SORA / Zetaman (cover) D", D, ch_title="D"),   # 単語の途中には一致させない
+          V("u1", "UMI - Ado (cover) A", A),
+          V("u2", "UMI / B", B, desc="Adobe Premiere で編集", ch_title="B"),
+          V("m1", "MORI / AB (cover) A", A)]                  # 2文字の名前は自動では使わない
+    t, _ = targets(cfg, vs, {})
+    assert t["SORA"].auto == {"s1"} and t["SORA"].cand == {"s2", "s3"}
+    assert t["UMI"].auto == {"u1"} and t["UMI"].cand == {"u2"}
+    assert t["MORI"].auto == set() and t["MORI"].cand == {"m1"}
+    assert rules.official_names({"official_channels": [{"id": O, "name": "Zeta Official"}]}, {O}, rules.Index(cfg, vs), cfg) == ["zeta"]

@@ -466,6 +466,7 @@ class Rec:
     art: bool     # TOPIC等の自動生成音源
     mv: bool      # タイトルにMV表記
     off: bool     # インスト・オフボーカル
+    x: str = ""   # nfkc(タイトル＋概要欄)。名前を単語の区切りで照合するため
 
 
 class Index:
@@ -496,7 +497,7 @@ class Index:
             segs = titles.segments(strip_off_vocal(v.get("title")), self.artists | {titles.artist_key(v.get("channel_title"))})
             key = ("|".join(k for k, _ in segs) or nz(t), version_tag(v.get("title") or ""))
             rec = Rec(v, v.get("channel_id"), t, nz(t), nz(x), key, [k for k, _ in segs], [d for _, d in segs],
-                      is_art_track(v), bool(MV_RE.search(t)), is_off_vocal(v.get("title")))
+                      is_art_track(v), bool(MV_RE.search(t)), is_off_vocal(v.get("title")), x)
             self.r[vid] = rec
             self.by_ch[rec.ch].add(vid)
             toks = set(HANDLE_RE.findall(x)) | set(UCID_RE.findall(x)) | \
@@ -545,6 +546,20 @@ class Index:
             return out
         pool = self.r.keys() if among is None else among
         return {vid for vid in pool if any(k in self.r[vid].xz for k in keys)}
+
+    def name_hits(self, names, among=None) -> set[str]:
+        """名前がタイトルか概要欄にある動画。英数字を含む名前は単語の途中には一致させない
+        （「Ado」が「Adobe」に当たらないように。名前の途中の空白・記号の有無は問わない）。"""
+        keys = [(n, nz(n)) for n in names or [] if len(nz(n)) >= 2]
+        pool = self.r.keys() if among is None else among
+        out = set()
+        for vid in pool:
+            r = self.r[vid]
+            for n, k in keys:
+                if k in r.xz and (not re.search(r"[a-z0-9]", nfkc(n)) or titles.word_match(n, r.x)):
+                    out.add(vid)
+                    break
+        return out
 
     def title_has(self, keywords, among) -> set[str]:
         r = _kw_re(tuple(keywords or ()))
@@ -754,11 +769,13 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         if s.get("exclude_keywords"):
             exact -= idx.title_has(s["exclude_keywords"], exact)
             partial -= idx.title_has(s["exclude_keywords"], partial)
-        originals = s.get("original_artists") or []
+        # 原曲のアーティスト名：original_artists に加えて、official_channels のチャンネル名も使う
+        # （「- Topic」「Official」などを除いた名前。2文字以下の名前は、ほかの語に当たりやすいので自動では使わない）
+        originals = list(s.get("original_artists") or []) + official_names(s, official, idx, cfg)
         if official or originals:
             off_videos = exact & idx.channels(official)
             tokens = ref_tokens(official, handles) | {"v:" + v.lower() for v in off_videos}
-            evidence = off_videos | idx.mentioning(tokens) | idx.alias_hits(originals, among=exact | partial)
+            evidence = off_videos | idx.mentioning(tokens) | idx.name_hits(originals, among=exact | partial)
             # 部分一致は、原曲の手がかりがあるときだけ確認候補にする。タイトルの並び（曲名・アーティスト名・
             # 歌った人の順番）は人によって違うので、位置では見分けられない。曲名を含む別のアーティスト名や
             # 別の曲名で当たったものは、手がかり（原曲のアーティスト名など）がないことで除く
@@ -774,6 +791,31 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         why.update({v: "原曲の手がかりなし" for v in cand - partial})
         emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), auto, cand, s,
              entity_of=ent_of(off_ent), extra_vocal=extra, why=why)
+    return out
+
+
+def official_names(s: dict, official: set, idx: "Index", cfg: Config) -> list[str]:
+    """お気に入りの曲の official_channels のチャンネル名（原曲のアーティスト名として使う）。
+
+    {id, name} の name、3分類の name で書いた場合はその項目のチャンネルの name、
+    取得した動画のチャンネル名。「- Topic」「Official」などを除き、3文字以上のものだけ。
+    """
+    raw = []
+    for r in s.get("official_channels") or []:
+        if isinstance(r, dict):
+            raw.append(r.get("name"))
+        else:
+            for _, _, _, e in tier_entries(cfg):
+                if e.get("name") == r:
+                    raw += [c.get("name") for c in e.get("channels") or [] if isinstance(c, dict)]
+    for c in official:
+        for vid in list(idx.by_ch.get(c, ()))[:1]:
+            raw.append(idx.r[vid].v.get("channel_title"))
+    out = []
+    for n in raw:
+        k = titles.artist_key(n)
+        if len(k) >= 3 and k not in out:
+            out.append(k)
     return out
 
 
