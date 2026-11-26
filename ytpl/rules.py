@@ -408,7 +408,7 @@ def validate(cfg: Config) -> list[str]:
             pls = hand.get("playlists")
             if pls is not None and (not isinstance(pls, list) or not all(isinstance(x, str) for x in pls)):
                 errors.append("hand_add.playlists: 文字列のリスト（\"unsorted\"・\"misc\" か再生リストの name）で書いてください")
-    # 自動で occasional に追加しないチャンネル（{id, name} のリスト）
+    # 監視しないが、管理対象の再生リストに入っていてよいチャンネル（{id, name} のリスト）
     check_channels(cfg.raw.get("ignore_channels"), "ignore_channels", allow_names=False)
     ignored = ignored_playlist_ids(cfg)
     if ignored:
@@ -802,6 +802,28 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         emit(_pl(ref, f"song:{i}", True, ("songs", i, "playlist")), auto, cand, s,
              entity_of=ent_of(off_ent), extra_vocal=extra, why=why)
     return out
+
+
+def unlisted_channels(cfg: Config, ledger_docs: dict) -> dict[str, dict]:
+    """管理対象の再生リストに入っている動画の投稿チャンネルのうち、config.yaml で監視対象にも
+    ignore_channels にもなっていないもの。チャンネルID -> {id, name, where}（where は見つけた場所の1つ）。
+
+    管理対象の再生リストの動画のチャンネルは、すべてどちらかに書かれている状態にするため
+    （毎日の同期は ignore_channels に「# 要確認」付きで追加し、ytpl.check は警告する）。
+    """
+    known = set(channel_roles(cfg)) | set(chan_ids(cfg, cfg.raw.get("ignore_channels")))
+    rejected = fixed_playlists(cfg)["rejected"].id
+    managed = {p.id for p in declared_playlists(cfg) if p.id} - ignored_playlist_ids(cfg) - {rejected}
+    out: dict[str, dict] = {}
+    for pid, doc in ledger_docs.items():
+        if pid not in managed:
+            continue
+        for e in (doc.get("items") or {}).values():
+            ch = e.get("channel_id")
+            if e.get("status") != "present" or not ch or ch in known or ch in out:
+                continue
+            out[ch] = {"id": ch, "name": e.get("channel_title"), "where": f"「{doc.get('title')}」の「{e.get('title')}」"}
+    return dict(sorted(out.items(), key=lambda kv: str(kv[1].get("name") or kv[0])))
 
 
 def official_names(s: dict, official: set, idx: "Index", cfg: Config) -> list[str]:

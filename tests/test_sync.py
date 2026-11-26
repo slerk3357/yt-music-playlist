@@ -767,9 +767,9 @@ def test_members_only_list_marks_videos(tmp_path):
     assert cat.channels[B].get("members_missing") == "2026-01-10"        # 一覧がないチャンネルは7日ごとに試す
 
 
-def test_unmonitored_channel_added_by_hand_goes_to_occasional(tmp_path):
-    """手で再生リストに入れた動画が監視していないチャンネルのものなら、そのチャンネルを occasional に
-    「# 要確認」付きで追加する。一度追加したチャンネルは、消しても二度と自動では追加しない。"""
+def test_unlisted_channels_are_added_to_ignore_channels(tmp_path, capsys):
+    """管理対象の再生リストの動画の投稿チャンネルは、監視対象か ignore_channels のどちらかに書かれている状態にする。
+    どちらにもないチャンネルは ignore_channels に「# 要確認」付きで追加する（消しても、どちらにもなければまた追加）。"""
     yt = setup(tmp_path)
     run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
     X, Y = C("newcomer"), C("ignored")
@@ -779,39 +779,46 @@ def test_unmonitored_channel_added_by_hand_goes_to_occasional(tmp_path):
     yt.pl["PLmisc"]["items"] += ["n1", "y1"]
     yt.pl["PLbob"]["items"].append("n2")
     cfg_path = tmp_path / "config.yaml"
-    text0 = cfg_path.read_text(encoding="utf-8")
-    cfg_path.write_text(text0 + f'ignore_channels:\n  - {{id: "{Y}", name: "無視Y"}}\n', encoding="utf-8")
+    base = cfg_path.read_text(encoding="utf-8") + f'ignore_channels:\n  - {{id: "{Y}", name: "無視Y"}}\n'
+    cfg_path.write_text(base, encoding="utf-8")
     text = run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
-    assert "監視対象（occasional）に追加したチャンネル" in text and f"新人X（{X}）" in text
+    assert "ignore_channels に追加したチャンネル" in text and f"新人X（{X}）" in text
     out = cfg_path.read_text(encoding="utf-8")
-    assert out.count(X) == 1 and Y in out                              # 同じチャンネルは1回だけ
-    line = next(ln for ln in out.splitlines() if 'name: "新人X"' in ln)
-    assert "# 要確認（2026-01-11 自動追加：「その他の曲」の「新しい曲 / 新人X」）" in line
-    occ = out.index("occasional:")
-    assert out.index('name: "新人X"', occ) < out.index("songs:")          # 次の章の見出しより前に入る
-    from ytpl.store import Config
-    cfg = Config(cfg_path)
-    assert rules.validate(cfg) == []
-    assert any(e.get("name") == "新人X" for e in cfg.raw["occasional"])
-    # 翌日から監視する
-    run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
+    assert out.count(X) == 1 and out.count(Y) == 1                    # 同じチャンネルは1回だけ。書いてあるものは足さない
+    line = next(ln for ln in out.splitlines() if X in ln)
+    assert line.strip().startswith(f'- {{id: "{X}", name: "新人X"}}') and "# 要確認（2026-01-11 自動追加：" in line
+    assert rules.validate(Config(cfg_path)) == []
     from ytpl.store import Catalog
+    run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
+    assert X not in Catalog(tmp_path / "data/catalog").channels           # 無視するチャンネルは監視しない
+    # config.yaml から消しただけなら、また追加する（ytpl.check でも警告）
+    cfg_path.write_text(base, encoding="utf-8")
+    from ytpl.check import check
+    capsys.readouterr()
+    check(cfg_path)
+    assert "監視対象でも ignore_channels でもないチャンネル: 新人X" in capsys.readouterr().out
+    run(yt=yt, now=day(1, 13), remote=None, **kw(tmp_path))
+    assert X in cfg_path.read_text(encoding="utf-8")
+    # 監視したいなら3分類に移す → 追加しない。翌日から監視し、監視外として記録していた曲もそのチャンネルの分になる
+    moved = base.replace("occasional:", f'occasional:\n  - name: "新人X"\n    channels: [{{id: "{X}", name: "新人X"}}]')
+    cfg_path.write_text(moved, encoding="utf-8")
+    text = run(yt=yt, now=day(1, 14), remote=None, **kw(tmp_path))
+    assert "ignore_channels に追加" not in text
     assert "n1" in Catalog(tmp_path / "data/catalog").channels[X]["videos"]
-    # config.yaml から消しても、また追加はしない
-    cfg_path.write_text(text0, encoding="utf-8")
-    yt.v["n3"] = V("n3", "三曲目 / 新人X", X, "01-06", ch_title="新人X")
-    yt.pl["PLmisc"]["items"].append("n3")
-    text = run(yt=yt, now=day(1, 13), remote=None, **kw(tmp_path))
-    assert X not in cfg_path.read_text(encoding="utf-8") and "監視対象（occasional）に追加" not in text
+    capsys.readouterr()
+    check(cfg_path)
+    assert "監視対象でも ignore_channels でもない" not in capsys.readouterr().out
 
 
-def test_first_backup_does_not_add_channels(tmp_path):
-    """初めてバックアップする再生リストの曲は「手で入れた」とみなさない。"""
+def test_unlisted_channels_already_in_playlists_are_added_on_first_run(tmp_path):
+    """導入した日に、すでに入っている動画のチャンネルも対象になる。ignore_channels がなければ作る。"""
     yt = setup(tmp_path)
     yt.v["n1"] = V("n1", "新しい曲 / 新人X", C("newcomer"), "01-05", ch_title="新人X")
     yt.pl["PLmisc"]["items"].append("n1")
     text = run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
-    assert "監視対象（occasional）に追加" not in text
+    assert "ignore_channels に追加したチャンネル" in text and "新人X" in text
+    out = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+    assert "ignore_channels:" in out and rules.validate(Config(tmp_path / "config.yaml")) == []
 
 
 def test_hand_add_when_quota_is_tight(tmp_path):
@@ -842,7 +849,6 @@ def test_hand_add_when_quota_is_tight(tmp_path):
     led = Ledger(tmp_path / "data/playlists")
     assert led.entry("PLunsorted", "d6")["status"] == "present" and led.entry("PLunsorted", "d6")["hand_done"]
     assert titles(yt)["未仕分け"].count("d6") == 1
-    assert "監視対象（occasional）に追加" not in text
     hand = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))["hand"]
     assert hand == []
 

@@ -85,3 +85,9 @@ songs:
     aliases: ["曲名X", "Kyokumei X"]
     official_channels:
       - {id: "UCffffffffffffffffffffff", name: "曲名Xの公式チャンネル"}
+
+# ===== 監視しないチャンネル =====
+# 管理対象の再生リストに動画が入っているチャンネルは、3分類か ignore_channels のどちらかに書く。
+# どちらにもないチャンネルは、毎日の実行で自動的にここへ「# 要確認」付きで追加される（監視したいなら3分類へ移す）
+ignore_channels:
+  - {id: "UCgggggggggggggggggggggg", name: "監視しないチャンネル"}

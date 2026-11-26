@@ -410,30 +410,19 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
 
     try:
         # 1. 管理対象の再生リストの中身をスナップショット（＝バックアップ）。管理外（ignore_playlists）はしない
-        added_by_hand: list[tuple[dict, str]] = []     # 前回のあとに新しく入った動画（手で入れたもの）
         for p in playlists:
             if p["id"] in managed_ids and p["id"] not in ignored:
-                for vid in ledger.apply_snapshot(p["id"], p["title"], yt.playlist_items(p["id"]), today):
-                    added_by_hand.append((p, vid))
-        # 1c. 手で入れた動画のうち、監視していないチャンネルのものは、そのチャンネルを occasional に追加する
-        #     （config.yaml に「# 要確認」を付ける。翌日から新着を取得する）。一度追加したチャンネルは、
-        #     config.yaml から消しても二度と自動では追加しない。ignore_channels のチャンネルも追加しない
-        auto_added = state.setdefault("auto_added_channels", {})
-        skip_ch = set(roles) | set(rules.chan_ids(cfg, cfg.raw.get("ignore_channels"))) | set(auto_added)
-        rejected_pid = fixed["rejected"].id
-        found: dict[str, dict] = {}
-        for p, vid in added_by_hand:
-            e = ledger.docs[p["id"]]["items"].get(vid) or {}
-            ch = e.get("channel_id")
-            if p["id"] == rejected_pid or e.get("status") != "present" or not ch or ch in skip_ch or ch in found:
-                continue
-            found[ch] = {"id": ch, "name": e.get("channel_title"), "where": f"「{p['title']}」の「{e.get('title')}」"}
+                ledger.apply_snapshot(p["id"], p["title"], yt.playlist_items(p["id"]), today)
+        # 1c. 管理対象の再生リストの動画の投稿チャンネルは、すべて config.yaml で監視対象か ignore_channels の
+        #     どちらかに書かれている状態にする。どちらにもないチャンネルは ignore_channels に「# 要確認」付きで追加する
+        #     （監視したいチャンネルは、利用者が3分類に移す）
+        state.pop("auto_added_channels", None)   # 前の版の記録（もう使わない）
+        found = rules.unlisted_channels(cfg, ledger.docs)
         if found:
-            from .pull_config import add_occasional_channels
-            for a in add_occasional_channels(cfg, list(found.values()), today):
-                auto_added[a["id"]] = today
-                rep.add("監視対象（occasional）に追加したチャンネル（config.yaml に「# 要確認」。翌日から新着を取得）",
-                        f"{a['name']}（{a['id']}）: {a['where']}")
+            from .pull_config import add_ignored_channels
+            for a in add_ignored_channels(cfg, list(found.values()), today):
+                rep.add("ignore_channels に追加したチャンネル（config.yaml に「# 要確認」。監視したいなら3分類へ移す）",
+                        f"{a.get('name')}（{a['id']}）: {a['where']}")
         for t in ledger.mark_deleted_playlists(set(alive), today):
             rep.add("警告", f"再生リスト「{t}」がYouTube上から消えています（台帳は保持）")
         for doc in ledger.docs.values():

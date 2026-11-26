@@ -79,6 +79,13 @@ def check(path: str | Path, label: str | None = None, fix: bool = False) -> int:
         cfg = Config(path)
     errs = rules.validate(cfg)
     warns = warnings(cfg) if not errs else []
+    # 管理対象の再生リストの動画のチャンネルが、監視対象か ignore_channels のどちらかに書かれているか（台帳で確かめる）
+    led_dir = path.parent / "data" / "playlists"
+    if not errs and led_dir.is_dir():
+        from .store import Ledger
+        for f in rules.unlisted_channels(cfg, Ledger(led_dir).docs).values():
+            warns.append(f"監視対象でも ignore_channels でもないチャンネル: {f.get('name')}（{f['id']}）: {f['where']}"
+                         "（次の同期で ignore_channels に「# 要確認」付きで追加されます）")
     if not fix and not fmt.is_formatted(path):
         warns.append("整形されていません（python -m ytpl.check --fix で、クオート・インデント・"
                      "チャンネル項目の並び順を整えられます）")
