@@ -1,0 +1,8 @@
+client_secret*.json
+__pycache__/
+.pytest_cache/
+config.draft.yaml
+# 環境変数のファイル（認証情報を入れることがあるため、コミットしない）
+.env
+.env.*
+.venv/

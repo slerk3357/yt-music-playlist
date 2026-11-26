@@ -1,0 +1,132 @@
+name: playlist-tools
+
+# YouTube を読み書きする補助コマンドを、手動で実行する（Actions → playlist-tools → Run workflow）。
+# Apps Script の認証は GitHub Actions の OIDC トークンで行うため、これらは手元では動かせない。
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "実行するコマンド"
+        type: choice
+        options:
+          - "draft_config（今の再生リストから config.draft.yaml を作る。成果物としてダウンロード）"
+          - "pull_config（再生リスト名の更新と、未登録の再生リストを ignore_playlists へ）"
+          - "pull_config --channel-names（チャンネルの name も更新）"
+          - "restore（バックアップから消えた曲を戻す）"
+          - "probe_channel（チャンネルの動画がどの取得元にあるか調べる。読み取りだけ）"
+      playlist:
+        description: "restore：台帳の再生リスト名"
+        type: string
+        default: ""
+      to_new:
+        description: "restore：この名前で新しい再生リストを作って復元（空なら元の再生リストに戻す）"
+        type: string
+        default: ""
+      channel:
+        description: "probe_channel：チャンネルID（UC…）。空白区切りで複数可"
+        type: string
+        default: ""
+      videos:
+        description: "probe_channel：どこにあるか調べる動画ID・再生リストID（空白区切り。OLAK…/PL… は再生リストとして調べる）"
+        type: string
+        default: ""
+      search:
+        description: "probe_channel：検索でもチャンネルの再生リストを探す（1チャンネル100ユニット）"
+        type: boolean
+        default: false
+      dry_run:
+        description: "書き込みせず内容だけ表示（draft_config と probe_channel は常に書き込みなし）"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: playlist-sync   # 毎日の同期と同時に動かさない
+  cancel-in-progress: false
+
+jobs:
+  tool:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # config.yaml・台帳を push する
+      id-token: write   # GitHub の OIDC トークンで Apps Script からトークンを受け取る
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install --require-hashes -r requirements.txt
+      - name: Run
+        env:
+          YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          COMMAND: ${{ inputs.command }}
+          PLAYLIST: ${{ inputs.playlist }}
+          TO_NEW: ${{ inputs.to_new }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CHANNEL: ${{ inputs.channel }}
+          VIDEOS: ${{ inputs.videos }}
+          SEARCH: ${{ inputs.search }}
+        run: |
+          set -euo pipefail
+          dry=()
+          if [ "$DRY_RUN" = "true" ]; then dry=(--dry-run); fi
+          case "$COMMAND" in
+            "draft_config"*)
+              python -m ytpl.draft_config > config.draft.yaml
+              { echo '### config.draft.yaml'; echo '```yaml'; cat config.draft.yaml; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            "pull_config --channel-names"*)
+              python -m ytpl.pull_config --channel-names "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            "pull_config"*)
+              python -m ytpl.pull_config "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            "restore"*)
+              if [ -z "$PLAYLIST" ]; then echo "::error::playlist を指定してください"; exit 1; fi
+              args=(--playlist "$PLAYLIST")
+              if [ -n "$TO_NEW" ]; then args+=(--to-new "$TO_NEW"); fi
+              python -m ytpl.restore "${args[@]}" "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            "probe_channel"*)
+              if [ -z "$CHANNEL" ]; then echo "::error::channel を指定してください"; exit 1; fi
+              set -f   # 入力の * などをファイル名に展開しない
+              args=()
+              for c in $CHANNEL; do args+=(--channel "$c"); done
+              for x in $VIDEOS; do
+                case "$x" in
+                  PL*|OLAK*|UU*|FL*|RD*) args+=(--playlist "$x") ;;
+                  *) args+=(--video "$x") ;;
+                esac
+              done
+              if [ "$SEARCH" = "true" ]; then args+=(--search); fi
+              python -m ytpl.probe "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+            *) echo "::error::不明なコマンド: $COMMAND"; exit 1 ;;
+          esac
+      # 下書きはコミットしない（.gitignore の対象）。実行結果の画面の Artifacts からダウンロードする
+      - name: Upload draft
+        if: ${{ startsWith(inputs.command, 'draft_config') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: config-draft
+          path: config.draft.yaml
+          if-no-files-found: error
+          retention-days: 7
+      - name: Commit
+        if: ${{ !inputs.dry_run && !startsWith(inputs.command, 'draft_config') && !startsWith(inputs.command, 'probe_channel') }}
+        env:
+          COMMAND: ${{ inputs.command }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for p in config.yaml data; do if [ -e "$p" ]; then git add -A "$p"; fi; done
+          git diff --cached --quiet || git commit -m "tools: ${COMMAND%%（*} $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          git pull --rebase --autostash origin main
+          git push

@@ -1,0 +1,79 @@
+name: deploy-worker
+
+# ミックスAPI（worker/、Void）を Cloudflare にデプロイする。
+# - Worker のコードや索引（data/mix/）を変えたとき
+# - 毎日の同期（playlist-sync）が終わったとき（同期の commit は GITHUB_TOKEN なので push では動かないため）
+# - 手動
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**", "data/mix/**", ".github/workflows/deploy-worker.yml"]
+  workflow_run:
+    workflows: [playlist-sync]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # 取り消された同期のあとは動かさない
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 初回デプロイなどで void.lock.json が変わったときだけ commit する
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main     # 同期が直前に commit した索引を含む最新の main
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: check secrets
+        id: secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # シークレットのないリポジトリ（公開のツールリポジトリなど）では、デプロイせずに終える
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::notice::Secret CLOUDFLARE_API_TOKEN がないため、デプロイしません（README「オリジナルミックスリスト」のセットアップを参照）"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm ci
+        if: steps.secrets.outputs.ok == 'true'
+        working-directory: worker
+      - run: npm test
+        if: steps.secrets.outputs.ok == 'true'
+        working-directory: worker
+      - name: void deploy
+        if: steps.secrets.outputs.ok == 'true'
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_WORKERS_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          # Access で守られた Worker の起動確認（readiness）に使う。同期用と同じサービストークン
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: npx --no-install void deploy --platform cloudflare
+      - name: commit void.lock.json
+        if: steps.secrets.outputs.ok == 'true'
+        run: |
+          if [ -n "$(git status --porcelain -- worker/void.lock.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add worker/void.lock.json
+            git commit -m "Worker のデプロイ状態（void.lock.json）を更新"
+            git push
+          fi

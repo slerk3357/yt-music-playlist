@@ -1,0 +1,93 @@
+# ===== yt-music-playlist 設定の例 =====
+# 各フィールドの仕様は docs/config.md を参照してください。
+# ・文字列はすべてダブルクオート（"…"）で囲みます（囲んでいないとエラーで止まります）。
+# ・チャンネル・再生リストは {id, name} の組で書きます。判別には id だけを使い、name は表示・確認用です。
+# ・システムは「新しく作った再生リストの id」と「昇格した曲」をこのファイルに書き込みます。
+#   コメント・クオート・並び順はそのまま残ります（インデント幅だけはファイル全体でそろえ直します）。
+
+playlist_privacy: "private"     # 新しく作る再生リストの公開設定
+
+quota:
+  daily_budget: 9000
+  write_reserve: 2000           # 曲の追加のために残しておく量
+
+playlists:
+  unsorted: {id: "PLexample01xxxxxxxxxxxxxxxxxxxxxxxx", name: "未仕分け"}
+  misc: {id: "PLexample02xxxxxxxxxxxxxxxxxxxxxxxx", name: "その他の曲"}
+
+music:
+  categories: ["10"]
+  include_keywords: ["歌ってみた", "うたってみた", "cover", "カバー", "MV", "Music Video", "オリジナル曲", "Original Song", "弾き語り", "feat."]
+  exclude_keywords: ["#shorts", "切り抜き", "歌枠", "配信", "雑談", "告知", "予告", "teaser", "trailer", "クロスフェード", "XFD", "short ver", "ショート"]
+  min_seconds: 61
+  max_seconds: 900
+
+matching:
+  use_description: true
+
+dedupe:
+  enabled: true
+
+promotion:
+  enabled: true
+  min_versions: 5
+  ignore: []
+
+ignore_video_ids: []
+
+# 管理外にする再生リスト（バックアップもしない）
+ignore_playlists:
+  - {id: "PLexample90xxxxxxxxxxxxxxxxxxxxxxxx", name: "作業用"}
+
+# ===== チャンネル =====
+top_favorites:
+  - name: "歌い手A"
+    channels:
+      - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "歌い手A"}
+      - {id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "歌い手A - Topic"}
+    playlist: {id: "PLexample03xxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
+    # membership: true                       # メンバーシップに入っているなら、メンバー限定の動画も扱う（先行公開は除く）
+    other:
+      playlist: {id: "PLexample04xxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
+      # exclude_channels: ["ユニットU"]      # 別名義・所属ユニットのチャンネルは「その他歌い手A」の候補にしない
+    specials:
+      # 作曲者Bが公開した、歌い手Aがボーカルの曲（「その他歌い手A」からは除外される）
+      # published_by は作曲者Bの動画だけが対象（歌い手A本人の動画は含めない）
+      - playlist: {name: "作曲者B×歌い手A"}
+        published_by: ["作曲者B"]               # 3分類の name で指定（作曲者Bの channels すべて）
+
+favorites:
+  - name: "作曲者B"
+    channels:
+      - {id: "UCcccccccccccccccccccccc", name: "作曲者B"}
+    playlist: {id: "PLexample05xxxxxxxxxxxxxxxxxxxxxxxx", name: "作曲者Bチャンネル"}
+    specials:
+      # 作曲者B本人が歌ったセルフカバー
+      - playlist: {name: "作曲者Bセルフカバー"}   # id がなければ初回に作成し、ここに id を書き込む
+        published_by: ["作曲者B"]
+        keywords: ["self cover", "セルフカバー"]
+
+occasional:
+  - name: "歌い手D"
+    channels:
+      - {id: "UCdddddddddddddddddddddd", name: "歌い手D"}
+    specials:
+      # 歌い手Dの曲のうち、歌い手Eが関わっているもの
+      - playlist: {name: "歌い手D×歌い手E"}
+        mentions:
+          - {id: "UCeeeeeeeeeeeeeeeeeeeeee", name: "歌い手E"}   # 3分類にない相手は {id, name} で書く
+        mention_aliases: ["歌い手E"]
+
+# ===== お気に入りの曲 =====
+songs:
+  - name: "曲名X"
+    playlist: {id: "PLexample06xxxxxxxxxxxxxxxxxxxxxxxx", name: "曲名X"}
+    aliases: ["曲名X", "Kyokumei X"]
+    official_channels:
+      - {id: "UCffffffffffffffffffffff", name: "曲名Xの公式チャンネル"}
+
+# ===== 監視しないチャンネル =====
+# 管理対象の再生リストに動画が入っているチャンネルは、3分類か ignore_channels のどちらかに書く。
+# どちらにもないチャンネルは、毎日の実行で自動的にここへ「# 要確認」付きで追加される（監視したいなら3分類へ移す）
+ignore_channels:
+  - {id: "UCgggggggggggggggggggggg", name: "監視しないチャンネル"}

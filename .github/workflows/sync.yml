@@ -1,0 +1,78 @@
+name: playlist-sync
+
+on:
+  schedule:
+    - cron: "17 19 * * *"   # 毎日 04:17 JST
+  # config.yaml を変更したら、id のない再生リストをすぐ作る（作成だけ。読み取り・追加はしない）
+  push:
+    branches: [main]
+    paths: ["config.yaml"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "書き込みせず予定だけ表示"
+        type: boolean
+        default: true
+
+# Actions はコミットの SHA で固定する（タグの付け替えによる改ざんを防ぐ）。更新するときは SHA ごと変える
+permissions: {}   # 既定ではなにも許可しない（ジョブごとに必要なものだけ）
+
+concurrency:
+  group: playlist-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'   # main ブランチ以外では実行しない
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write   # バックアップと config.yaml の更新を push する
+      id-token: write   # GitHub の OIDC トークンを受け取り、Apps Script に送る（保存しておく秘密は使わない）
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # config.yaml と Secrets が揃っているリポジトリでだけ動く（公開用リポジトリでは何もしない）
+      - name: Check setup
+        id: check
+        env:
+          HAS_TOKEN: ${{ secrets.YT_TOKEN_URL != '' || secrets.YT_REFRESH_TOKEN != '' }}
+        run: |
+          if [ -f config.yaml ] && [ "$HAS_TOKEN" = "true" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::config.yaml または Secrets がないため同期をスキップしました"
+          fi
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.check.outputs.ok == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - if: steps.check.outputs.ok == 'true'
+        run: pip install --require-hashes -r requirements.txt
+      - name: Sync
+        if: steps.check.outputs.ok == 'true'
+        env:
+          YT_TOKEN_URL: ${{ secrets.YT_TOKEN_URL }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          # 追加の提案の決定（ミックスAPIの画面で選んだもの）を読む。なくても動く
+          MIX_WORKER_URL: ${{ secrets.MIX_WORKER_URL }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: >-
+          python -m ytpl.sync
+          ${{ github.event_name == 'push' && '--create-only' || '' }}
+          ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Commit backup
+        if: steps.check.outputs.ok == 'true' && !inputs.dry_run
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config.yaml data reports
+          git diff --cached --quiet || git commit -m "sync: $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
+          # 実行中に config.yaml を手で編集・push していた場合に備えて取り込んでから push
+          git pull --rebase --autostash origin main
+          git push
