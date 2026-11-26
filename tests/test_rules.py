@@ -483,8 +483,9 @@ favorites:
     assert t["その他A"].cand == {"x1"}
 
 
-def test_song_partial_match_only_in_title_position(tmp_path):
-    """曲名の部分一致は最初の区切り（曲名の位置）だけ。アーティスト名の位置で当たっても候補にしない。"""
+def test_song_partial_match_needs_evidence_when_configured(tmp_path):
+    """部分一致は、原曲の手がかり（original_artists など）を書いた曲では、手がかりがあるときだけ確認候補。
+    タイトルの並びは人によって違うので、区切りの位置では判定しない。"""
     A = C("a")
     cfg = cfg_of(tmp_path, f"""
 favorites:
@@ -492,7 +493,14 @@ favorites:
     channels: [{{id: "{A}", name: "A"}}]
 songs:
   - name: "KAZE"
+    original_artists: ["作者Z"]
+  - name: "SORA"
 """)
-    vs = [V("c1", "別の曲 - KAZE Band / A (cover)", A), V("c2", "KAZE Remix Party / A", A), V("c3", "KAZE / A", A)]
+    vs = [V("c1", "別の曲 - KAZE Band / A (cover)", A),        # アーティスト名に曲名が含まれる（手がかりなし）
+          V("c2", "A / KAZE Band - 別の曲 (cover)", A),        # 並びが違っても同じ
+          V("c3", "KAZE Remix Party / 作者Z / A", A),           # 部分一致＋手がかり → 確認
+          V("c4", "KAZE / 作者Z (cover) A", A),                 # 完全一致＋手がかり → 自動
+          V("s1", "A / SORA Band - 別の曲 (cover)", A)]          # 手がかりを書いていない曲は、部分一致を確認候補に
     t, _ = targets(cfg, vs, {})
-    assert t["KAZE"].auto == {"c3"} and t["KAZE"].cand == {"c2"}
+    assert t["KAZE"].auto == {"c4"} and t["KAZE"].cand == {"c3"}
+    assert t["SORA"].cand == {"s1"}

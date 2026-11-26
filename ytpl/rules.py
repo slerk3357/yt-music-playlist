@@ -747,9 +747,7 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             r = idx.r[vid]
             if any(k in r.segs for k in keys):
                 exact.add(vid)
-            elif any(titles.word_match(n, d) for n in names for d in r.segd[:1] if nz(n) in nz(d)):
-                # 部分一致は、曲名の位置（最初の区切り）だけ。2番目以降はアーティスト名の位置のことが多く、
-                # 「曲名 - アーティスト名 / 歌った人」の形のカバーで、アーティスト名に曲名が含まれると誤って当たるため
+            elif any(titles.word_match(n, d) for n in names for d in r.segd if nz(n) in nz(d)):
                 partial.add(vid)
         if s.get("exclude_keywords"):
             exact -= idx.title_has(s["exclude_keywords"], exact)
@@ -759,6 +757,10 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             off_videos = exact & idx.channels(official)
             tokens = ref_tokens(official, handles) | {"v:" + v.lower() for v in off_videos}
             evidence = off_videos | idx.mentioning(tokens) | idx.alias_hits(originals, among=exact | partial)
+            # 部分一致は、原曲の手がかりがあるときだけ確認候補にする。タイトルの並び（曲名・アーティスト名・
+            # 歌った人の順番）は人によって違うので、位置では見分けられない。曲名を含む別のアーティスト名や
+            # 別の曲名で当たったものは、手がかり（原曲のアーティスト名など）がないことで除く
+            partial &= evidence
             auto, cand = exact & evidence, (exact - evidence) | partial
         else:
             auto, cand = exact, partial
