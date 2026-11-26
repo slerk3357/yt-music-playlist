@@ -77,6 +77,18 @@ def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: da
     json_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_review(path: Path, items: list[dict], now: datetime) -> None:
+    """config.yaml で「# 要確認」が付いている項目を、Worker 用（JSON）に書き出す。"""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["{", '  "version": 1,', f'  "generated_at": {json.dumps(now.isoformat(timespec="seconds"))},', '  "items": [']
+    rows = [json.dumps(it, ensure_ascii=False, separators=(",", ":")) for it in items]
+    lines += [f"    {r}{',' if n < len(rows) - 1 else ''}" for n, r in enumerate(rows)]
+    lines += ["  ]", "}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def handles_of(state: dict) -> dict[str, list[str]]:
     """チャンネルID -> 今と過去の @ハンドル（概要欄では古いハンドルのまま書かれていることがあるため、両方で照合する）。"""
     out = {}
@@ -365,6 +377,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                 rp = rp.with_name(rp.stem + "-create" + rp.suffix)
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(text, encoding="utf-8")
+            # 「# 要確認」の項目（Worker の「要確認」画面用）。作成だけの実行でも書く（未登録の再生リストが増えるため）
+            from .pull_config import review_items
+            write_review(data / "mix" / "review.json", review_items(cfg), now)
             if not create_only:
                 misc = {"id": pids["misc"], "name": fixed["misc"].name} if pids.get("misc") else None
                 write_suggestions(rp.with_name("suggestions.md"), data / "mix" / "suggestions.json",
@@ -381,7 +396,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         create_missing_playlists(cfg, yt, playlists, alive, ledger, rep, dry_run)
         # config.yaml のどこにも載っていない再生リストは、管理外として ignore_playlists に記録する
         from .pull_config import add_unknown_to_ignore
-        for p in add_unknown_to_ignore(cfg, playlists):
+        for p in add_unknown_to_ignore(cfg, playlists, today):
             rep.add("管理外として ignore_playlists に追加（要確認）", f"{p['title']}: {p['id']}")
     except QuotaExceeded as e:
         rep.add("警告", f"再生リストの作成中にクォータ上限に達しました: {e}")

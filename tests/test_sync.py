@@ -788,6 +788,12 @@ def test_unlisted_channels_are_added_to_ignore_channels(tmp_path, capsys):
     line = next(ln for ln in out.splitlines() if X in ln)
     assert line.strip().startswith(f'- {{id: "{X}", name: "新人X"}}') and "# 要確認（2026-01-11 自動追加：" in line
     assert rules.validate(Config(cfg_path)) == []
+    # Worker の「要確認」画面用の一覧
+    import json
+    review = json.loads((tmp_path / "data/mix/review.json").read_text(encoding="utf-8"))["items"]
+    assert {"kind": "channel", "section": "ignore_channels", "id": X, "name": "新人X",
+            "note": "2026-01-11 自動追加：「その他の曲」の「新しい曲 / 新人X」"} in review
+    assert not any(it["id"] == Y for it in review)                    # 「# 要確認」のないものは出さない
     from ytpl.store import Catalog
     run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
     assert X not in Catalog(tmp_path / "data/catalog").channels           # 無視するチャンネルは監視しない

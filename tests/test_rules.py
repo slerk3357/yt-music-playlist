@@ -546,3 +546,19 @@ def test_hand_add_validation(tmp_path):
     assert any("hand_add.mode" in e for e in errs) and any("hand_add.playlists" in e for e in errs)
     p.write_text('hand_add:\n  mode: "always"\n  playlists: ["misc", "夜の曲"]\n', encoding="utf-8")
     assert rules.validate(Config(p)) == []
+
+
+def test_review_items_from_comments(tmp_path):
+    from ytpl.pull_config import review_items
+    p = tmp_path / "r.yaml"
+    p.write_text('ignore_playlists:\n'
+                 '  - {id: "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "A"} # 要確認\n'
+                 '  - {id: "PLbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", name: "B"}\n'
+                 '  - {id: "PLcccccccccccccccccccccccccccccccccc", name: "C"}   # 要確認（2026-11-27 自動追加）\n'
+                 '\n# 末尾のコメント\n'
+                 'ignore_channels:\n'
+                 '  - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "X"} # 確認済み\n', encoding="utf-8")
+    assert review_items(Config(p)) == [
+        {"kind": "playlist", "section": "ignore_playlists", "id": "PLaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "A", "note": ""},
+        {"kind": "playlist", "section": "ignore_playlists", "id": "PLcccccccccccccccccccccccccccccccccc", "name": "C",
+         "note": "2026-11-27 自動追加"}]
