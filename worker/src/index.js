@@ -6,6 +6,8 @@
 //   GET /top/<name>         特にお気に入りのチャンネル <name>（または番号）の再生リストから
 //   GET /suggestions        ほかの再生リストへの追加の提案（提案先ごとの一覧）
 //   GET /suggestions/<n>?p=0  n 番目の提案先のまだ決めていない曲を、50曲ずつ YouTube の一時リストで開く（to=music で YouTube Music）
+//   GET /hand                 手で追加してほしい曲（クォータが足りない日の分）の手順と一覧
+//   GET /hand/<n>?p=0         n 番目の再生リストに手で追加してほしい曲を、50曲ずつ YouTube アプリの一時リストで開く
 //   POST /api/decide        提案への決定（追加・却下・取り消し）。Durable Object（DECISIONS）に保存する
 //   GET  /api/sync/decisions, POST /api/sync/ack   毎日の同期用（Access のサービストークン）
 //
@@ -55,7 +57,7 @@ li{list-style:none}ul{padding:0}small{color:#666}h2{margin-top:1.5em;font-size:1
 .play img{width:100%;height:100%;object-fit:cover;display:block}.play span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:2em;text-shadow:0 0 6px #000}
 .item iframe{width:min(100%,480px);aspect-ratio:16/9;border:0;flex:1 1 320px}
 .actions{margin-top:6px}.actions button{margin:4px 6px 4px 0;padding:8px 14px;border-radius:8px;border:1px solid #888;background:#fff;font-size:1em}
-.actions .add{background:#e7f3e7}.actions .misc{background:#eef0fb}.actions .reject{background:#f6e6e6}.actions button:disabled{opacity:.45}</style>`;
+.notice{background:#fff4d6;border:1px solid #e0b84c;border-radius:8px;padding:8px 10px}.actions .add{background:#e7f3e7}.actions .misc{background:#eef0fb}.actions .reject{background:#f6e6e6}.actions button:disabled{opacity:.45}</style>`;
 
 /** 提案先の再生リストID -> {group, n, items: Map(動画ID -> 提案)} */
 function suggestionIndex(sug) {
@@ -195,20 +197,59 @@ ${body || "<p>提案はありません。</p>"}<p><a href="/">← メニュー</
 <script>${PAGE_SCRIPT}</script></body></html>`;
 }
 
+/**
+ * 手で追加してほしい曲（クォータが足りない日に、API で入れる代わりに一時リストで渡す分）。
+ * 保存は YouTube アプリで行う（一時リストをまとめて再生リストに保存できる）ので、YouTube で開くボタンだけを出す。
+ */
+function handPage(sug) {
+  const groups = sug.hand || [];
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  const body = groups.map((g, n) => {
+    const name = escapeHtml(g.name);
+    const pages = Math.ceil(g.items.length / MAX_VIDEOS);
+    const opens = Array.from({ length: pages }, (_, p) => {
+      const from = p * MAX_VIDEOS + 1;
+      const to = Math.min(g.items.length, (p + 1) * MAX_VIDEOS);
+      return `<p><b>${from}〜${to}曲目：</b><a class="btn" href="/hand/${n}?p=${p}">YouTube アプリで開く</a>` +
+        `<a class="btn" href="/hand/${n}?p=${p}&app=intent">Android の YouTube アプリで開く</a></p>`;
+    }).join("");
+    const items = g.items.map((it) => `<li class="item"><a href="https://youtu.be/${escapeHtml(it.id)}">${escapeHtml(it.title || it.id)}</a>` +
+      `${it.channel ? ` <small>${escapeHtml(it.channel)}</small>` : ""}</li>`).join("");
+    return `<section class="group"><h2>「${name}」に追加（${g.items.length} 曲）</h2>${opens}
+<details><summary>曲の一覧</summary><ul>${items}</ul></details>
+<p><small><a href="https://www.youtube.com/playlist?list=${encodeURIComponent(g.id)}">「${name}」を YouTube で開く</a></small></p></section>`;
+  }).join("");
+  return `<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>手で追加してほしい曲</title>${STYLE}</head><body>
+<h1>手で追加してほしい曲</h1>
+<p><small>${total} 曲（${escapeHtml(sug.generated_at || "")} 時点）。その日の YouTube API の使用量（クォータ）が足りなかったため、
+システムが入れる代わりに、まとめて保存してほしい曲です。</small></p>
+<ol>
+<li>下のボタンで、曲を一時リストとして <b>YouTube アプリ</b>で開きます（YouTube Music ではなく YouTube です）。</li>
+<li>一時リストを保存するメニューから、見出しの再生リスト（例：「${escapeHtml((groups[0] || {}).name || "未仕分け")}」）を選んで、まとめて保存します。</li>
+<li>50曲を超える場合は、ボタンごとに繰り返します。</li>
+<li>次の同期（毎朝）で、入っているかを確かめます。入っていればこの一覧から消え、入っていなければまた表示されます。</li>
+</ol>
+${body || "<p>手で追加してほしい曲はありません。</p>"}<p><a href="/">← メニュー</a></p></body></html>`;
+}
+
 function menu(index, sug = EMPTY_SUGGESTIONS) {
   const link = (href, label, note = "") =>
     `<li><a href="${escapeHtml(href)}">${escapeHtml(label)}</a>${note ? ` <small>${escapeHtml(note)}</small>` : ""}</li>`;
   const tops = (index.top_favorites || []).map((g) =>
     link(`/top/${encodeURIComponent(g.name)}`, `${g.name} ミックス`, `${g.playlists.length} 再生リスト`)).join("");
   const n = (index.playlists || []).reduce((s, p) => s + (p.videos || []).length, 0);
+  const handN = (sug.hand || []).reduce((s, g) => s + g.items.length, 0);
+  const notice = handN
+    ? `<p class="notice"><b>手で追加してほしい曲が ${handN} 曲あります。</b> <a href="/hand">手順と一時リストを開く</a></p>` : "";
   return `<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>オリジナルミックス</title>
 ${STYLE}</head><body>
-<h1>オリジナルミックス</h1><p><small>${(index.playlists || []).length} 再生リスト・のべ ${n} 曲（${escapeHtml(index.generated_at || "")} 時点）</small></p>
+<h1>オリジナルミックス</h1>${notice}<p><small>${(index.playlists || []).length} 再生リスト・のべ ${n} 曲（${escapeHtml(index.generated_at || "")} 時点）</small></p>
 <ul>${link(`/random`, "完全ランダム")}${link(`/playlists?k=3`, "ランダム再生リスト", "3つの再生リストから")}</ul>
 <h2>特にお気に入りのチャンネル</h2><ul>${tops || "<li><small>なし</small></li>"}</ul>
 <h2>管理</h2><ul>${link(`/suggestions`, "追加の提案",
-    `${(sug.groups || []).reduce((n, g) => n + g.items.length, 0)} 件`)}</ul>
+    `${(sug.groups || []).reduce((n, g) => n + g.items.length, 0)} 件`)}${link(`/hand`, "手で追加してほしい曲", `${handN} 曲`)}</ul>
 <p><small>リンクを開くたびに選び直します。Android でブラウザが開く場合は、URL に <code>?app=intent</code> を付けてください。</small></p>
 <p><small><a href="/random?app=intent">完全ランダム（Android アプリを指定）</a></small></p>
 </body></html>`;
@@ -311,6 +352,18 @@ async function handle(request, env, ctx, index, sug, sugIndex) {
   if (parts.length === 0) return html(menu(index, sug));
 
   const q = Object.fromEntries(url.searchParams);
+  if (parts[0] === "hand") {
+    if (parts.length === 1) return html(handPage(sug));
+    const g = (sug.hand || [])[Number(parts[1])];
+    const page = Math.max(0, Number.parseInt(q.p ?? "0", 10) || 0);
+    const ids = g ? g.items.slice(page * MAX_VIDEOS, (page + 1) * MAX_VIDEOS).map((it) => it.id) : [];
+    if (ids.length === 0) return text("手で追加してほしい曲がありません", 404);
+    const temp = await resolveTemporaryList(ids).catch(() => null);
+    const yt = temp ? youtubeUrl(temp) : watchVideosUrl(ids);
+    const target = q.app === "intent" ? intentUrl(yt, YT_PACKAGE) : yt;
+    if (format(q) === "json") return json({ name: g.name, videos: ids, temporary_list: temp?.list ?? null, open_url: target });
+    return new Response(null, { status: 302, headers: { Location: target, "Cache-Control": "no-store" } });
+  }
   if (parts[0] === "suggestions") {
     const decisions = await readDecisions(env).catch(() => null);
     if (parts.length === 1) return html(suggestionsPage(sug, decisions));

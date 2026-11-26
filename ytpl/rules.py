@@ -398,6 +398,16 @@ def validate(cfg: Config) -> list[str]:
             errors.append(f"ignore_playlists[{i}]: 再生リストは id と name の両方が必要です")
         elif not PL_RE.match(r["id"]):
             errors.append(f"ignore_playlists[{i}]: 再生リストIDの形式が違います: {r['id']}")
+    hand = cfg.raw.get("hand_add")
+    if hand is not None:
+        if not isinstance(hand, dict):
+            errors.append("hand_add: {mode, playlists} の形で書いてください")
+        else:
+            if hand.get("mode") is not None and hand.get("mode") not in ("overflow", "always", "never"):
+                errors.append("hand_add.mode: overflow / always / never のどれかです")
+            pls = hand.get("playlists")
+            if pls is not None and (not isinstance(pls, list) or not all(isinstance(x, str) for x in pls)):
+                errors.append("hand_add.playlists: 文字列のリスト（\"unsorted\"・\"misc\" か再生リストの name）で書いてください")
     # 自動で occasional に追加しないチャンネル（{id, name} のリスト）
     check_channels(cfg.raw.get("ignore_channels"), "ignore_channels", allow_names=False)
     ignored = ignored_playlist_ids(cfg)

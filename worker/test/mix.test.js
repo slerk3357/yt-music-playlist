@@ -368,3 +368,26 @@ test("「その他の曲に追加」のボタンと決定", async () => {
 test("stateLabel：その他の曲に追加", () => {
   assert.equal(stateLabel({ action: "misc", applied_at: "x", result: "added" }), "「その他の曲」に追加済み");
 });
+
+test("手で追加してほしい曲：メニューのお知らせ・手順・YouTube アプリで開く", async () => {
+  setupWorld();
+  const ids = Array.from({ length: 51 }, (_, i) => VID(100 + i));
+  const sug = { ...SUG2, hand: [{ name: "未仕分け", id: "PLunsortedX", items: ids.map((id) => ({ id, title: `曲${id}`, channel: "B" })) }] };
+  const w = createHandler(INDEX_DATA, sug);
+  const menuHtml = await (await w.fetch(new Request("https://mix.example/"), ENV, CTX)).text();
+  assert.match(menuHtml, /手で追加してほしい曲が 51 曲あります/);
+  const html = await (await w.fetch(new Request("https://mix.example/hand"), ENV, CTX)).text();
+  assert.match(html, /YouTube Music ではなく YouTube です/);
+  assert.match(html, /1〜50曲目/);
+  assert.match(html, /51〜51曲目/);
+  assert.doesNotMatch(html, /to=music/);                                // YouTube Music では開かない
+  const j = await (await w.fetch(new Request("https://mix.example/hand/0?p=1&format=json"), ENV, CTX)).json();
+  assert.deepEqual(j.videos, [VID(150)]);
+  assert.match(j.open_url, /^https:\/\/www\.youtube\.com\//);
+  const a = await (await w.fetch(new Request("https://mix.example/hand/0?app=intent&format=json"), ENV, CTX)).json();
+  assert.match(a.open_url, /^intent:\/\/.*package=com\.google\.android\.youtube/);
+  assert.equal((await w.fetch(new Request("https://mix.example/hand/5"), ENV, CTX)).status, 404);
+  // ないときはお知らせを出さない
+  const plain = await (await createHandler(INDEX_DATA, SUG2).fetch(new Request("https://mix.example/"), ENV, CTX)).text();
+  assert.doesNotMatch(plain, /class="notice"/);
+});

@@ -373,8 +373,8 @@ def test_create_only_and_no_duplicate(tmp_path):
 
 
 def test_new_songs_before_backlog(tmp_path):
-    """新曲（未仕分け・○○チャンネル）が、取り込み待ちより先に追加される。"""
-    yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\npromotion:"))
+    """新曲（未仕分け・○○チャンネル）が、取り込み待ちより先に追加される（手で追加してもらう機能は使わない場合）。"""
+    yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\nhand_add:\n  mode: \"never\"\npromotion:"))
     run(yt=yt, now=day(1, 10), **kw(tmp_path))
     # 新しい曲名を songs に足す（過去の曲が取り込み待ちになる）と同時に、新曲を2つ公開
     cfg = (tmp_path / "config.yaml").read_text(encoding="utf-8") + '  - name: "朝の曲"\n'
@@ -812,3 +812,44 @@ def test_first_backup_does_not_add_channels(tmp_path):
     yt.pl["PLmisc"]["items"].append("n1")
     text = run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
     assert "監視対象（occasional）に追加" not in text
+
+
+def test_hand_add_when_quota_is_tight(tmp_path):
+    """入りきらない日は「未仕分け」「その他の曲」の分を一時リストで渡し、空いたクォータをほかに使う。
+    次のバックアップで入っていれば追加済みにし、監視外のチャンネルの自動追加の対象にもしない。"""
+    import json
+    yt = setup(tmp_path, CONFIG.replace("promotion:", "quota:\n  write_reserve: 0\npromotion:"))
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    yt.v["a6"] = V("a6", "『花の曲』アリス MV", A, "03-01")
+    yt.v["d6"] = V("d6", "別の曲 / デイブ", D, "03-02")
+    yt.v["d7"] = V("d7", "三つ目の曲 / デイブ", D, "03-02")
+    yt.used, yt.budget = 0, 0
+    yt.budget = 40 + 50 * 1                    # 書き込みは1件分だけ
+    text = run(yt=yt, now=day(3, 10), **kw(tmp_path))
+    t = titles(yt)
+    assert "a6" in t["アリスチャンネル"]                 # 空いたクォータはほかの再生リストに使う
+    assert "d6" not in t["未仕分け"] and "d7" not in t["未仕分け"]
+    assert "手で追加してほしい曲" in text and "watch_videos?video_ids=" in text
+    hand = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))["hand"]
+    assert [(g["name"], sorted(it["id"] for it in g["items"])) for g in hand] == [("未仕分け", ["d6", "d7"])]
+    from ytpl.store import Ledger
+    led = Ledger(tmp_path / "data/playlists")
+    assert led.entry("PLunsorted", "d6")["status"] == "pending" and led.entry("PLunsorted", "d6")["hand_since"]
+    # 手で入れてもらった → 次の同期で追加済み。API では入れない
+    yt.pl["PLunsorted"]["items"] += ["d6", "d7"]
+    yt.used, yt.budget = 0, 10000
+    text = run(yt=yt, now=day(3, 11), **kw(tmp_path))
+    led = Ledger(tmp_path / "data/playlists")
+    assert led.entry("PLunsorted", "d6")["status"] == "present" and led.entry("PLunsorted", "d6")["hand_done"]
+    assert titles(yt)["未仕分け"].count("d6") == 1
+    assert "監視対象（occasional）に追加" not in text
+    hand = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))["hand"]
+    assert hand == []
+
+
+def test_hand_add_always(tmp_path):
+    yt = setup(tmp_path, CONFIG.replace("promotion:", 'hand_add:\n  mode: "always"\npromotion:'))
+    run(yt=yt, now=day(1, 10), **kw(tmp_path))
+    yt.v["d6"] = V("d6", "別の曲 / デイブ", D, "03-02")
+    text = run(yt=yt, now=day(3, 10), **kw(tmp_path))
+    assert "d6" not in titles(yt)["未仕分け"] and "手で追加してほしい曲" in text

@@ -36,6 +36,9 @@ def dump_yaml(path: Path, data) -> None:
 DEFAULTS = {
     "playlist_privacy": "private",
     "quota": {"daily_budget": 9000, "write_reserve": 2000},
+    # 手で追加してもらう再生リスト（クォータの節約）。mode: overflow（入りきらない日だけ）/ always / never。
+    # playlists は "unsorted"・"misc" か、再生リストの name
+    "hand_add": {"mode": "overflow", "playlists": ["unsorted", "misc"]},
     "playlists": {"unsorted": {"name": "未仕分け"}, "misc": {"name": "その他の曲"}},
     "music": {
         "categories": ["10"],
@@ -326,6 +329,9 @@ class Ledger:
                     e["unavailable_since"] = today
                 e["status"] = "unavailable"
             else:
+                if e.get("hand_since"):        # 手で追加してもらうよう頼んでいた曲が入った
+                    e.pop("hand_since")
+                    e["hand_done"] = today
                 e["status"] = "present"
                 e.pop("unavailable_since", None)
             e.pop("missing_since", None)

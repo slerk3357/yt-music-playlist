@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import rules
-from .api import ApiError, QuotaExceeded, YouTube, uploads_playlist_id
+from .api import COST, ApiError, QuotaExceeded, YouTube, uploads_playlist_id
 from .decisions import Decisions, Remote, RemoteError
 from .store import EXTERNAL, Catalog, Config, Ledger, _plain, dump_yaml, load_yaml
 
@@ -45,7 +45,8 @@ def _label(v: dict | None, vid: str) -> str:
     return f"{v.get('title')} / {v.get('channel_title') or '?'} (https://youtu.be/{vid})"
 
 
-def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: datetime, misc: dict | None = None) -> None:
+def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: datetime, misc: dict | None = None,
+                      hand: list | None = None) -> None:
     """追加の提案を、読む用（Markdown）と Worker 用（JSON）に書き出す。"""
     import json
 
@@ -68,7 +69,8 @@ def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: da
     json_path.parent.mkdir(parents=True, exist_ok=True)
     out = {"version": 1, "generated_at": now.isoformat(timespec="seconds"), "groups": groups}
     lines = ["{", f'  "version": 1,', f'  "generated_at": {json.dumps(out["generated_at"])},',
-             f'  "misc": {json.dumps(misc, ensure_ascii=False)},', '  "groups": [']
+             f'  "misc": {json.dumps(misc, ensure_ascii=False)},',
+             f'  "hand": {json.dumps(hand or [], ensure_ascii=False, separators=(",", ":"))},', '  "groups": [']
     gs = [json.dumps(g, ensure_ascii=False, separators=(",", ":")) for g in groups]
     lines += [f"    {g}{',' if n < len(gs) - 1 else ''}" for n, g in enumerate(gs)]
     lines += ["  ]", "}"]
@@ -366,7 +368,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             if not create_only:
                 misc = {"id": pids["misc"], "name": fixed["misc"].name} if pids.get("misc") else None
                 write_suggestions(rp.with_name("suggestions.md"), data / "mix" / "suggestions.json",
-                                  suggestions, now, misc=misc)
+                                  suggestions, now, misc=misc, hand=list(hand_groups.values()))
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write(text + "\n")
@@ -608,7 +610,8 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             pl, pid = misc_pl, misc_pid
         if ledger.status(pid, vid) == "present":
             if not dry_run:
-                decisions.mark(rec, "already", now.isoformat(timespec="seconds"))
+                hand_done = (ledger.entry(pid, vid) or {}).get("hand_done")
+                decisions.mark(rec, "added" if hand_done else "already", now.isoformat(timespec="seconds"))
             continue
         decided[(pid, vid)] = rec
         if (pl.key, vid) in planned:
@@ -623,6 +626,44 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
 
     def title_of(vid, pid):
         return (catalog.get(vid) or {}).get("title") or (decided.get((pid, vid)) or {}).get("title")
+
+    # 7b. 手で追加してもらう分（クォータの節約）。対象の再生リストの曲は、API で入れずに一時リストで渡す
+    #     （Worker の「手で追加してほしい曲」と、レポートのリンク）。次のバックアップで入っていれば追加済みになる
+    hcfg = cfg.section("hand_add")
+    hand_names = set(hcfg.get("playlists") or [])
+    mode = hcfg.get("mode") or "overflow"
+
+    def is_hand(pl) -> bool:
+        return pl.key in hand_names or pl.name in hand_names
+
+    hand: list[tuple] = []
+    if mode != "never" and any(is_hand(pl) for pl, _, _ in plan):
+        affordable = max(0, yt.remaining) // COST["insert"]
+        if mode == "always" or len(plan) > affordable:
+            hand = [(pl, vid) for pl, vid, _ in plan if is_hand(pl) and pids.get(pl.key)]
+            plan = [x for x in plan if not (is_hand(x[0]) and pids.get(x[0].key))]
+    hand_groups: dict[str, dict] = {}
+    for pl, vid in hand:
+        pid = pids[pl.key]
+        v = catalog.get(vid) or {}
+        g = hand_groups.setdefault(pid, {"name": pl.name, "id": pid, "items": []})
+        g["items"].append({"id": vid, "title": v.get("title") or title_of(vid, pid), "channel": v.get("channel_title")})
+        if not dry_run:
+            e = ledger.entry(pid, vid)
+            e.setdefault("title", v.get("title") or title_of(vid, pid))
+            e.setdefault("channel_id", v.get("channel_id"))
+            e.setdefault("channel_title", v.get("channel_title"))
+            e.setdefault("first_seen", today)
+            e.setdefault("hand_since", today)
+            e["status"] = "pending"
+    for g in hand_groups.values():
+        ids_ = [it["id"] for it in g["items"]]
+        sec = (f"手で追加してほしい曲（クォータの節約。ミックスAPIの「手で追加してほしい曲」か、"
+               f"下のリンクの一時リストを再生リストに保存してください。次の同期で確認します）")
+        for i in range(0, len(ids_), 50):
+            chunk = ids_[i:i + 50]
+            rep.add(sec, f"{g['name']}: {i + 1}〜{i + len(chunk)}曲目（全 {len(ids_)} 曲） "
+                         f"https://www.youtube.com/watch_videos?video_ids={','.join(chunk)}")
 
     # 8. 実行（追加のみ）
     if not quota_hit:

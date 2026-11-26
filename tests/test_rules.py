@@ -537,3 +537,12 @@ songs:
     assert t["UMI"].auto == {"u1"} and t["UMI"].cand == {"u2"}
     assert t["MORI"].auto == set() and t["MORI"].cand == {"m1"}
     assert rules.official_names({"official_channels": [{"id": O, "name": "Zeta Official"}]}, {O}, rules.Index(cfg, vs), cfg) == ["zeta"]
+
+
+def test_hand_add_validation(tmp_path):
+    p = tmp_path / "h.yaml"
+    p.write_text('hand_add:\n  mode: "sometimes"\n  playlists: "misc"\n', encoding="utf-8")
+    errs = rules.validate(Config(p))
+    assert any("hand_add.mode" in e for e in errs) and any("hand_add.playlists" in e for e in errs)
+    p.write_text('hand_add:\n  mode: "always"\n  playlists: ["misc", "夜の曲"]\n', encoding="utf-8")
+    assert rules.validate(Config(p)) == []
