@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import rules
@@ -124,80 +124,135 @@ def _collect(pages, known: set, incremental: bool) -> list[str]:
     return out
 
 
-def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Report,
-                   allow_search: bool = False) -> list[str]:
-    """チャンネルの動画を差分取得。新着ID（初回取込時は空）を返す。
+RELEASE_PREFIX = "OLAK5uy_"   # リリース（アルバム・シングル）の再生リスト
+PLAYLIST_REFRESH_DAYS = 30     # 件数が変わらなくても、この日数ごとに中身を読み直す
 
-    通常はアップロード一覧（UU…）を読む。TOPIC チャンネルなど、アップロード一覧が見つからない場合は
-    次の順に代わりの方法を試し、うまくいった方法をカタログに記録して次回から使う。
-      1. チャンネル情報に書かれたアップロード一覧のID
-      2. チャンネルページの棚（アルバム・シングルなど）に並ぶ再生リスト（その動画のうち、このチャンネルのもの）
-      3. 検索（100ユニット。allow_search のときだけ。新しい順に最大50件）
+
+def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Report,
+                   allow_search: bool = False, related: dict | None = None, owners: set | None = None) -> list[str]:
+    """チャンネルの動画を取得する。新着ID（そのチャンネルの初回取込時は空）を返す。
+
+    取りこぼしがないよう、次の取得元をすべて毎回読む（どれかが失敗しても、ほかは続ける）。
+      1. アップロード一覧（UU…）。新しい順なので、知っている動画が続いたら止める（差分取得）
+      2. チャンネル情報に書かれたアップロード一覧のID（1 と違う場合だけ）
+      3. チャンネルページの棚に並ぶ再生リストと、リリース（OLAK5uy_… の再生リスト）。
+         アップロード一覧にない動画（リリースにだけある動画、限定公開の動画など）を拾うため。
+         件数が前回と同じなら読み直さない（PLAYLIST_REFRESH_DAYS 日ごとには読み直す）。
+         取り込むのは、このチャンネルか owners（同じ項目に登録したチャンネル。本人・サブ・Topic）が投稿した動画だけ
+      4. 検索（100ユニット。1〜3 のどれも使えなかったときだけ。allow_search のときだけ。新しい順に最大50件）
+    related は、チャンネルID -> 2 のID を先にまとめて取ったもの（なければここで取る）。
     """
     ch = catalog.channel(cid)
     first = not ch.get("initialized")
-    known = set(ch["videos"])
-    source = ch.get("source") or "uploads"
-    new_ids: list[str] = []
-    owner_check = False
+    owners = set(owners or ()) | {cid}
+    trusted: list[str] = []          # 1・2 から（このチャンネルの動画）
+    listed: list[str] = []           # 3 から（投稿者を確かめる）
+    used: list[str] = []
+    seen = set(catalog.index)
 
-    def try_uploads(pid):
-        return _collect(yt.playlist_pages(pid), known, not first)
+    def take(ids, into):
+        for v in ids:
+            if v not in seen:
+                seen.add(v)
+                into.append(v)
 
-    try:
-        if source == "uploads":
-            try:
-                new_ids = try_uploads(uploads_playlist_id(cid))
-            except ApiError as e:
-                if e.status != 404:
-                    raise
-                source = "related"
-        if source == "related":
-            pid = ch.get("uploads_id") or yt.uploads_id(cid)
-            try:
-                if not pid or pid == uploads_playlist_id(cid):
-                    raise ApiError(404, "playlistNotFound")
-                new_ids = try_uploads(pid)
-                ch["uploads_id"] = pid
-            except ApiError as e:
-                if e.status != 404:
-                    raise
-                source = "sections"
-        if source == "sections":
-            pls = yt.section_playlists(cid)
-            if pls:
-                owner_check = True
-                for pid in pls:
-                    try:
-                        new_ids += [v for v in _collect(yt.playlist_pages(pid), known | set(new_ids), False)]
-                    except ApiError:
-                        continue
+    week_ago = (date.fromisoformat(today) - timedelta(days=7)).isoformat()
+    uu = uploads_playlist_id(cid)
+
+    # 1. アップロード一覧（Topic チャンネルなどで見つからなかった場合は、7日ごとに試し直す）
+    if not (ch.get("uploads_missing") or "") > week_ago:
+        try:
+            take(_collect(yt.playlist_pages(uu), seen, not first), trusted)
+            used.append("uploads")
+            ch.pop("uploads_missing", None)
+        except ApiError as e:
+            if e.status != 404:
+                rep.add("警告", f"チャンネル {cid} のアップロード一覧を取得できません: {e.reason or e.status}")
             else:
-                source = "search"
-        if source == "search":
-            if not allow_search:
-                rep.add("次回以降に取り込むチャンネル（予約枠のため）", f"{cid}（検索で取得するチャンネル）")
-                ch["source"] = "search"
-                catalog.dirty.add(cid)
-                return []
-            after = None if first else (ch.get("last_checked") and f"{ch['last_checked']}T00:00:00Z")
-            new_ids = [v for v in yt.search_channel_video_ids(cid, after) if v not in known]
-            owner_check = True
-    except ApiError as e:
-        rep.add("警告", f"チャンネル {cid} の動画一覧を取得できません: {e.reason or e.status}")
-        return []
+                ch["uploads_missing"] = today
 
-    if source != (ch.get("source") or "uploads"):
-        rep.add("動画一覧の取得方法を変更", f"{cid}: {source}（アップロード一覧が見つからないため）")
+    # 2. チャンネル情報に書かれたアップロード一覧
+    try:
+        rel = related[cid] if related is not None and cid in related else yt.uploads_id(cid)
+        if rel and rel != uu:
+            take(_collect(yt.playlist_pages(rel), seen, not first), trusted)
+            used.append("related")
+            ch["uploads_id"] = rel
+    except ApiError as e:
+        if e.status != 404:
+            rep.add("警告", f"チャンネル {cid} のアップロード一覧（チャンネル情報）を取得できません: {e.reason or e.status}")
+
+    # 3. 棚の再生リストとリリース
+    counts: dict[str, int | None] = {}
+    titles: dict[str, str | None] = {}
+    try:
+        for pid in yt.section_playlists(cid):
+            counts.setdefault(pid, None)
+    except ApiError as e:
+        rep.add("警告", f"チャンネル {cid} の棚を取得できません: {e.reason or e.status}")
+    try:
+        for p in yt.channel_playlists(cid):
+            if p["id"].startswith(RELEASE_PREFIX):
+                counts[p["id"]], titles[p["id"]] = p.get("count"), p.get("title")
+    except ApiError as e:
+        rep.add("警告", f"チャンネル {cid} の再生リスト一覧を取得できません: {e.reason or e.status}")
+    unknown = [p for p, n in counts.items() if n is None]
+    if unknown:
+        try:
+            for pid, info in yt.playlists_info(unknown).items():
+                counts[pid], titles[pid] = info.get("count"), info.get("title")
+        except ApiError:
+            pass
+    cache = ch.setdefault("playlists", {})
+    month_ago = (date.fromisoformat(today) - timedelta(days=PLAYLIST_REFRESH_DAYS)).isoformat()
+    for pid, n in counts.items():
+        c = cache.get(pid) or {}
+        if c.get("read") and n is not None and c.get("count") == n and c["read"] > month_ago:
+            continue
+        try:
+            take([x["video_id"] for page in yt.playlist_pages(pid) for x in page], listed)
+        except ApiError:
+            continue
+        if not c and not first:
+            rep.add("新しく見つけた再生リスト（棚・リリース）", f"{cid}: {titles.get(pid) or pid}（{pid}）")
+        cache[pid] = {"title": titles.get(pid) or c.get("title"), "count": n, "read": today}
+    if counts:
+        used.append("playlists")
+
+    # 4. 検索（ほかの取得元がどれも使えなかったときだけ）
+    if not used:
+        if not allow_search:
+            rep.add("次回以降に取り込むチャンネル（予約枠のため）", f"{cid}（検索で取得するチャンネル）")
+            ch["source"] = "search"
+            catalog.dirty.add(cid)
+            return []
+        after = None if first else (ch.get("last_checked") and f"{ch['last_checked']}T00:00:00Z")
+        try:
+            take(yt.search_channel_video_ids(cid, after), listed)
+            used.append("search")
+        except ApiError as e:
+            rep.add("警告", f"チャンネル {cid} の動画を検索できません: {e.reason or e.status}")
+            return []
+
+    source = "+".join(used)
+    if ch.get("source") and source != ch["source"]:
+        rep.add("動画一覧の取得元が変わったチャンネル", f"{cid}: {ch['source']} → {source}")
     ch["source"] = source
-    for v in yt.videos(new_ids):
-        if owner_check and v.get("channel_id") != cid:
-            continue  # アルバム等に入っている、ほかのチャンネルの動画は除く
-        catalog.add(cid, v)
+    added = []
+    trusted_set = set(trusted)
+    for v in yt.videos(trusted + listed):
+        owner = v.get("channel_id")
+        if v["id"] in trusted_set:
+            catalog.add(cid, v)
+        elif owner in owners:
+            catalog.add(owner, v)   # 同じ項目のほかのチャンネル（Topic など）の動画は、そのチャンネルの分として記録
+        else:
+            continue                # アルバム等に入っている、関係のないチャンネルの動画は除く
+        added.append(v["id"])
     ch["initialized"] = ch.get("initialized") or today
     ch["last_checked"] = today
     catalog.dirty.add(cid)
-    return [] if first else [v for v in new_ids if v in catalog]
+    return [] if first else added
 
 
 def create_missing_playlists(cfg: Config, yt: YouTube, playlists: list[dict], alive: dict, ledger: Ledger,
@@ -340,14 +395,25 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
         # 2. 監視チャンネルの新着取得。取り込み済みのチャンネルを先に、新しく追加したチャンネルの全件取得は予約枠の範囲で
         known = [c for c in roles if (catalog.channels.get(c) or {}).get("initialized")]
         fresh = [c for c in roles if c not in known]
+        try:
+            related = yt.uploads_ids(sorted(roles)) if roles else {}   # 50チャンネルで1ユニット
+        except ApiError:
+            related = None   # チャンネルごとに取る
+        ent = rules.entity_map(cfg)
+        group: dict[str, set] = {}
+        for c, k in ent.items():
+            group.setdefault(k, set()).add(c)
+        owners_of = {c: group.get(ent.get(c), {c}) for c in roles}
         for cid in known:
-            new_ids += update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(101))
+            new_ids += update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(101),
+                                      related=related, owners=owners_of[cid])
         deferred = []
         for cid in fresh:
             if not optional_ok(50):
                 deferred.append(roles[cid]["name"] or cid)
                 continue
-            update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(150))
+            update_channel(yt, catalog, cid, today, rep, allow_search=optional_ok(150),
+                           related=related, owners=owners_of[cid])
         if deferred:
             rep.add("次回以降に取り込むチャンネル（予約枠のため）", "、".join(dict.fromkeys(deferred)))
 

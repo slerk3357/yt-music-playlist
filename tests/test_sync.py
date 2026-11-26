@@ -50,6 +50,25 @@ class FakeYouTube(YouTube):
         self._spend("list")
         return list(self.albums.get(cid, {}))
 
+    releases = {}            # チャンネルID -> {リリースの再生リストID: [動画ID]}（channel_playlists に出る）
+
+    def uploads_ids(self, ids):
+        self._spend("list")
+        return {c: (None if c in self.topic_channels else "UU" + c[2:]) for c in ids}
+
+    def channel_playlists(self, cid):
+        self._spend("list")
+        return [{"id": pid, "title": pid, "count": len(v)} for pid, v in self.releases.get(cid, {}).items()]
+
+    def playlists_info(self, ids):
+        self._spend("list")
+        out = {}
+        for group in list(self.albums.values()) + list(self.releases.values()):
+            for pid, v in group.items():
+                if pid in ids:
+                    out[pid] = {"title": pid, "count": len(v), "channel_id": None}
+        return out
+
     def search_channel_video_ids(self, cid, after=None):
         self._spend("search")
         return list(self.searchable.get(cid, []))
@@ -59,16 +78,18 @@ class FakeYouTube(YouTube):
         if pid.startswith("UU") and "UC" + pid[2:] in self.topic_channels:
             self._spend("list")
             raise ApiError(404, "playlistNotFound")
-        for albums in self.albums.values():
+        for albums in list(self.albums.values()) + list(self.releases.values()):
             if pid in albums:
-                rows = [{"item_id": f"{pid}-{i}", "video_id": i} for i in albums[pid]]
+                rows = [{"item_id": f"{pid}-{i}", "video_id": i, "title": self.v[i]["title"],
+                         "channel_id": self.v[i]["channel_id"], "privacy": self.v[i].get("privacy", "public")}
+                        for i in albums[pid]]
                 self._spend("list")
                 yield rows
                 return
         if pid.startswith("UU"):
             cid = "UC" + pid[2:]
             ids = [v["id"] for v in sorted(self.v.values(), key=lambda x: x["published_at"], reverse=True)
-                   if v["channel_id"] == cid]
+                   if v["channel_id"] == cid and v.get("privacy", "public") == "public" and not v.get("release_only")]
             rows = [{"item_id": f"u-{i}", "video_id": i} for i in ids]
         else:
             rows = [{"item_id": f"{pid}-{i}", "video_id": i, "title": self.v[i]["title"],
@@ -475,14 +496,48 @@ def test_topic_channel_fallbacks(tmp_path):
     assert "t1" in titles(yt)["アリスチャンネル"] and "x1" not in titles(yt)["アリスチャンネル"]
     from ytpl.store import Catalog
     cat = Catalog(tmp_path / "data/catalog")
-    assert cat.channels[AT2]["source"] == "sections" and cat.channels[BT]["source"] == "search"
+    assert cat.channels[AT2]["source"] == "playlists" and cat.channels[BT]["source"] == "search"
+    assert cat.channels[AT2]["uploads_missing"] == "2026-01-10"          # UU… は7日ごとに試し直す
     assert "s1" in cat.channels[BT]["videos"]
-    assert "動画一覧の取得方法を変更" in text
-    # 2回目は記録した方法をそのまま使う（UU… を試し直さない）
+    # 2回目：新しいアルバムも読む
     yt.v["t2"] = V("t2", "雲の歌", AT2, "02-01", desc="Provided to YouTube by Label", ch_title="アリス2 - Topic")
     yt.albums[AT2]["OLAKalbum2"] = ["t2"]
     run(yt=yt, now=day(2, 10), **kw(tmp_path))
     assert "t2" in titles(yt)["アリスチャンネル"]
+
+
+def test_all_sources_are_read_by_default(tmp_path):
+    """アップロード一覧が読めるチャンネルでも、棚の再生リストとリリースを読み、
+    アップロード一覧にない動画（リリースにだけある動画・限定公開の動画）を取り込む。"""
+    yt = setup(tmp_path)
+    yt.v["r1"] = {**V("r1", "砂の歌", A, "01-02"), "release_only": True}        # リリースにだけある本人の動画
+    yt.v["u1"] = {**V("u1", "風の歌", A, "01-02"), "privacy": "unlisted"}       # 限定公開（棚の再生リストにだけある）
+    yt.v["t9"] = V("t9", "月の歌", AT, "01-02", desc="Provided to YouTube by Label", ch_title="アリス - Topic")
+    yt.v["x9"] = V("x9", "他人の曲", C("someone"), "01-02")
+    yt.releases = {A: {"OLAK5uy_rel1": ["r1", "t9", "x9"], "PLnotrelease": ["x9"]}}
+    yt.albums = {A: {"PLshelf": ["u1"]}}
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    got = titles(yt)["アリスチャンネル"]
+    assert {"r1", "u1", "t9"} <= set(got)          # Topic（同じ項目のチャンネル）の曲も取り込む
+    assert "x9" not in got                          # 関係のないチャンネルの動画は除く
+    from ytpl.store import Catalog
+    cat = Catalog(tmp_path / "data/catalog")
+    assert cat.channels[A]["source"] == "uploads+playlists"
+    assert "t9" in cat.channels[AT]["videos"]       # 投稿したチャンネルの分として記録
+    assert set(cat.channels[A]["playlists"]) == {"OLAK5uy_rel1", "PLshelf"}   # リリース以外の再生リストは読まない
+
+    # 件数が変わらなければ読み直さない。増えたら読み直し、新着として扱う
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    assert Catalog(tmp_path / "data/catalog").channels[A]["playlists"]["OLAK5uy_rel1"]["read"] == "2026-01-10"
+    yt.v["r2"] = {**V("r2", "雪の歌", A, "01-03"), "release_only": True}
+    yt.releases[A]["OLAK5uy_rel1"].append("r2")
+    yt.releases[A]["OLAK5uy_rel2"] = []
+    text = run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
+    assert "r2" in titles(yt)["アリスチャンネル"]
+    # 30日たったら、件数が同じでも読み直す
+    run(yt=yt, now=day(2, 12), remote=None, **kw(tmp_path))
+    assert Catalog(tmp_path / "data/catalog").channels[A]["playlists"]["OLAK5uy_rel1"]["read"] == "2026-02-12"
+    assert "新しく見つけた再生リスト（棚・リリース）" in text and "OLAK5uy_rel2" in text
 
 
 def test_suggestions_for_other_playlists(tmp_path):
@@ -653,3 +708,21 @@ def test_rejected_playlist_not_created_automatically(tmp_path):
     yt = setup(tmp_path)
     run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
     assert "提案を却下" not in titles(yt)
+
+
+def test_probe_channel_reports_sources(tmp_path):
+    from ytpl.probe import probe_channel
+    yt = setup(tmp_path)
+    yt.v["r1"] = {**V("r1", "砂の歌", A, "01-02"), "release_only": True}
+    yt.v["u1"] = {**V("u1", "風の歌", A, "01-02"), "privacy": "unlisted"}
+    yt.releases = {A: {"OLAK5uy_rel1": ["r1"]}}
+    yt.albums = {A: {"PLshelf": ["u1"]}}
+    yt.channel_sections = lambda cid: [{"type": "multiplePlaylists", "title": "棚", "playlists": list(yt.albums.get(cid, {}))}]
+    yt.search_channel_playlists = lambda cid: []
+    before = {k: len(v["items"]) for k, v in yt.pl.items()}
+    md = "\n".join(probe_channel(yt, A, ["r1", "zz"], [], search=False, max_pages=5))
+    assert "OLAK5uy_rel1" in md and "4. 公開再生リスト（リリース）" in md and "3. 棚" in md
+    assert "アップロード一覧にない本人の動画（2 件）" in md
+    assert "- r1:" in md and "OLAK5uy_rel1" in md.split("- r1:")[1].split("\n")[1]
+    assert "- zz: 動画情報を取得できません" in md
+    assert {k: len(v["items"]) for k, v in yt.pl.items()} == before      # 何も書き込まない

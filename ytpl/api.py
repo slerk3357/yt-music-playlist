@@ -184,7 +184,7 @@ class YouTube:
         for i in range(0, len(ids), 50):
             chunk = ids[i:i + 50]
             r = self._exec(self.s.videos().list(
-                part="snippet,contentDetails", id=",".join(chunk)), "list")
+                part="snippet,contentDetails,status", id=",".join(chunk)), "list")
             for it in r.get("items", []):
                 sn = it["snippet"]
                 out.append({
@@ -197,6 +197,7 @@ class YouTube:
                     "category": sn.get("categoryId"),
                     "duration": parse_duration(it.get("contentDetails", {}).get("duration")),
                     "live": sn.get("liveBroadcastContent", "none"),
+                    "privacy": it.get("status", {}).get("privacyStatus"),
                 })
         return out
 
@@ -205,6 +206,51 @@ class YouTube:
         r = self._exec(self.s.channels().list(part="contentDetails", id=channel_id), "list")
         items = r.get("items", [])
         return items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads") if items else None
+
+    def uploads_ids(self, channel_ids: list[str]) -> dict[str, str | None]:
+        """チャンネルID -> チャンネル情報に書かれたアップロード一覧のID（50チャンネルで1ユニット）。
+        存在しないチャンネルは結果に含まれない。"""
+        out = {}
+        for i in range(0, len(channel_ids), 50):
+            r = self._exec(self.s.channels().list(part="contentDetails", id=",".join(channel_ids[i:i + 50])), "list")
+            for it in r.get("items", []):
+                out[it["id"]] = it.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+        return out
+
+    def channel_playlists(self, channel_id: str) -> list[dict]:
+        """チャンネルが公開している再生リスト [{id, title, count}]（50件で1ユニット）。"""
+        out, token = [], None
+        while True:
+            r = self._exec(self.s.playlists().list(part="snippet,contentDetails", channelId=channel_id,
+                                                   maxResults=50, pageToken=token), "list")
+            out += [{"id": it["id"], "title": it["snippet"].get("title"),
+                     "count": it.get("contentDetails", {}).get("itemCount")} for it in r.get("items", [])]
+            token = r.get("nextPageToken")
+            if not token:
+                return out
+
+    def playlists_info(self, ids: list[str]) -> dict[str, dict]:
+        """再生リストID -> {title, count, channel_id}（50件で1ユニット）。見つからないものは含まれない。"""
+        out = {}
+        for i in range(0, len(ids), 50):
+            r = self._exec(self.s.playlists().list(part="snippet,contentDetails", id=",".join(ids[i:i + 50]),
+                                                   maxResults=50), "list")
+            for it in r.get("items", []):
+                out[it["id"]] = {"title": it["snippet"].get("title"), "channel_id": it["snippet"].get("channelId"),
+                                 "count": it.get("contentDetails", {}).get("itemCount")}
+        return out
+
+    def channel_sections(self, channel_id: str) -> list[dict]:
+        """チャンネルページの棚 [{type, title, playlists}]（診断用。1ユニット）。"""
+        r = self._exec(self.s.channelSections().list(part="snippet,contentDetails", channelId=channel_id), "list")
+        return [{"type": it.get("snippet", {}).get("type"), "title": it.get("snippet", {}).get("title"),
+                 "playlists": it.get("contentDetails", {}).get("playlists", [])} for it in r.get("items", [])]
+
+    def search_channel_playlists(self, channel_id: str) -> list[dict]:
+        """チャンネルの再生リストを検索で取得（診断用。100ユニット）。"""
+        r = self._exec(self.s.search().list(part="snippet", channelId=channel_id, type="playlist", maxResults=50),
+                       "search")
+        return [{"id": it["id"]["playlistId"], "title": it["snippet"].get("title")} for it in r.get("items", [])]
 
     def section_playlists(self, channel_id: str) -> list[str]:
         """チャンネルページの棚（アルバム・シングルなど）に並ぶ再生リストのID。"""

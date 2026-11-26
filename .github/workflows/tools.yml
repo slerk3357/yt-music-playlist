@@ -13,6 +13,7 @@ on:
           - "pull_config（再生リスト名の更新と、未登録の再生リストを ignore_playlists へ）"
           - "pull_config --channel-names（チャンネルの name も更新）"
           - "restore（バックアップから消えた曲を戻す）"
+          - "probe_channel（チャンネルの動画がどの取得元にあるか調べる。読み取りだけ）"
       playlist:
         description: "restore：台帳の再生リスト名"
         type: string
@@ -21,8 +22,20 @@ on:
         description: "restore：この名前で新しい再生リストを作って復元（空なら元の再生リストに戻す）"
         type: string
         default: ""
+      channel:
+        description: "probe_channel：チャンネルID（UC…）。空白区切りで複数可"
+        type: string
+        default: ""
+      videos:
+        description: "probe_channel：どこにあるか調べる動画ID・再生リストID（空白区切り。OLAK…/PL… は再生リストとして調べる）"
+        type: string
+        default: ""
+      search:
+        description: "probe_channel：検索でもチャンネルの再生リストを探す（1チャンネル100ユニット）"
+        type: boolean
+        default: false
       dry_run:
-        description: "書き込みせず内容だけ表示（draft_config は常に書き込みなし）"
+        description: "書き込みせず内容だけ表示（draft_config と probe_channel は常に書き込みなし）"
         type: boolean
         default: true
 
@@ -57,6 +70,9 @@ jobs:
           PLAYLIST: ${{ inputs.playlist }}
           TO_NEW: ${{ inputs.to_new }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CHANNEL: ${{ inputs.channel }}
+          VIDEOS: ${{ inputs.videos }}
+          SEARCH: ${{ inputs.search }}
         run: |
           set -euo pipefail
           dry=()
@@ -78,6 +94,20 @@ jobs:
               if [ -n "$TO_NEW" ]; then args+=(--to-new "$TO_NEW"); fi
               python -m ytpl.restore "${args[@]}" "${dry[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
               ;;
+            "probe_channel"*)
+              if [ -z "$CHANNEL" ]; then echo "::error::channel を指定してください"; exit 1; fi
+              set -f   # 入力の * などをファイル名に展開しない
+              args=()
+              for c in $CHANNEL; do args+=(--channel "$c"); done
+              for x in $VIDEOS; do
+                case "$x" in
+                  PL*|OLAK*|UU*|FL*|RD*) args+=(--playlist "$x") ;;
+                  *) args+=(--video "$x") ;;
+                esac
+              done
+              if [ "$SEARCH" = "true" ]; then args+=(--search); fi
+              python -m ytpl.probe "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
             *) echo "::error::不明なコマンド: $COMMAND"; exit 1 ;;
           esac
       # 下書きはコミットしない（.gitignore の対象）。実行結果の画面の Artifacts からダウンロードする
@@ -90,7 +120,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Commit
-        if: ${{ !inputs.dry_run && !startsWith(inputs.command, 'draft_config') }}
+        if: ${{ !inputs.dry_run && !startsWith(inputs.command, 'draft_config') && !startsWith(inputs.command, 'probe_channel') }}
         env:
           COMMAND: ${{ inputs.command }}
         run: |
