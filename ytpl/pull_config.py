@@ -100,6 +100,43 @@ def add_unknown_to_ignore(cfg: Config, playlists: list[dict]) -> list[dict]:
     return new
 
 
+def add_occasional_channels(cfg: Config, found: list[dict], today: str) -> list[dict]:
+    """監視していないチャンネルを occasional の先頭に「# 要確認」付きで追加する（保存はしない）。
+
+    found は [{id, name, where}]（where は見つけた場所。コメントに書く）。追加したものを返す。
+    3分類の name は重複できないので、同じ名前があれば「名前（チャンネルID）」にする。
+    """
+    from .rules import tier_entries
+    from .store import _plain_tree
+
+    if not found:
+        return []
+    names = {e.get("name") for _, _, _, e in tier_entries(cfg)}
+    seq = cfg.doc.get("occasional")
+    if not isinstance(seq, CommentedSeq):
+        seq = CommentedSeq()
+        cfg.doc["occasional"] = seq
+    added = []
+    for f in found:
+        name = f.get("name") or f["id"]
+        if name in names:
+            name = f"{name}（{f['id']}）"
+        names.add(name)
+        ch = CommentedMap([("id", dq(f["id"])), ("name", dq(f.get("name") or f["id"]))])
+        ch.fa.set_flow_style()
+        chans = CommentedSeq([ch])
+        chans.fa.set_flow_style()
+        m = CommentedMap([("name", dq(name)), ("channels", chans)])
+        note = f"要確認（{today} 自動追加：{f.get('where')}）" if f.get("where") else f"要確認（{today} 自動追加）"
+        m.yaml_add_eol_comment(note.replace("#", "＃"), "name", column=0)
+        # 先頭に入れる（末尾に入れると、最後の項目の後ろにある次の章の見出しコメントより後ろに書き出されるため）
+        seq.insert(len(added), m)
+        added.append({**f, "name": name})
+    cfg.raw = _plain_tree(cfg.doc)
+    cfg.dirty = True
+    return added
+
+
 def pull(cfg: Config, yt: YouTube, channel_names: bool = False) -> list[str]:
     """cfg.doc を書き換え、変更・警告の一覧を返す（保存はしない）。"""
     log: list[str] = []

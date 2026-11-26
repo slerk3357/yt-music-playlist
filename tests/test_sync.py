@@ -765,3 +765,50 @@ def test_members_only_list_marks_videos(tmp_path):
     cat = Catalog(tmp_path / "data/catalog")
     assert cat.channels[A]["videos"]["m1"]["members"] is True
     assert cat.channels[B].get("members_missing") == "2026-01-10"        # 一覧がないチャンネルは7日ごとに試す
+
+
+def test_unmonitored_channel_added_by_hand_goes_to_occasional(tmp_path):
+    """手で再生リストに入れた動画が監視していないチャンネルのものなら、そのチャンネルを occasional に
+    「# 要確認」付きで追加する。一度追加したチャンネルは、消しても二度と自動では追加しない。"""
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    X, Y = C("newcomer"), C("ignored")
+    yt.v["n1"] = V("n1", "新しい曲 / 新人X", X, "01-05", ch_title="新人X")
+    yt.v["n2"] = V("n2", "別の曲 / 新人X", X, "01-05", ch_title="新人X")
+    yt.v["y1"] = V("y1", "曲 / 無視Y", Y, "01-05", ch_title="無視Y")
+    yt.pl["PLmisc"]["items"] += ["n1", "y1"]
+    yt.pl["PLbob"]["items"].append("n2")
+    cfg_path = tmp_path / "config.yaml"
+    text0 = cfg_path.read_text(encoding="utf-8")
+    cfg_path.write_text(text0 + f'ignore_channels:\n  - {{id: "{Y}", name: "無視Y"}}\n', encoding="utf-8")
+    text = run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    assert "監視対象（occasional）に追加したチャンネル" in text and f"新人X（{X}）" in text
+    out = cfg_path.read_text(encoding="utf-8")
+    assert out.count(X) == 1 and Y in out                              # 同じチャンネルは1回だけ
+    line = next(ln for ln in out.splitlines() if 'name: "新人X"' in ln)
+    assert "# 要確認（2026-01-11 自動追加：「その他の曲」の「新しい曲 / 新人X」）" in line
+    occ = out.index("occasional:")
+    assert out.index('name: "新人X"', occ) < out.index("songs:")          # 次の章の見出しより前に入る
+    from ytpl.store import Config
+    cfg = Config(cfg_path)
+    assert rules.validate(cfg) == []
+    assert any(e.get("name") == "新人X" for e in cfg.raw["occasional"])
+    # 翌日から監視する
+    run(yt=yt, now=day(1, 12), remote=None, **kw(tmp_path))
+    from ytpl.store import Catalog
+    assert "n1" in Catalog(tmp_path / "data/catalog").channels[X]["videos"]
+    # config.yaml から消しても、また追加はしない
+    cfg_path.write_text(text0, encoding="utf-8")
+    yt.v["n3"] = V("n3", "三曲目 / 新人X", X, "01-06", ch_title="新人X")
+    yt.pl["PLmisc"]["items"].append("n3")
+    text = run(yt=yt, now=day(1, 13), remote=None, **kw(tmp_path))
+    assert X not in cfg_path.read_text(encoding="utf-8") and "監視対象（occasional）に追加" not in text
+
+
+def test_first_backup_does_not_add_channels(tmp_path):
+    """初めてバックアップする再生リストの曲は「手で入れた」とみなさない。"""
+    yt = setup(tmp_path)
+    yt.v["n1"] = V("n1", "新しい曲 / 新人X", C("newcomer"), "01-05", ch_title="新人X")
+    yt.pl["PLmisc"]["items"].append("n1")
+    text = run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    assert "監視対象（occasional）に追加" not in text

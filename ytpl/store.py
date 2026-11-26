@@ -234,6 +234,11 @@ class Catalog:
         ch["videos"][video["id"]] = rec
         self.index[video["id"]] = rec
         self.dirty.add(key)
+        # 監視外として記録していた動画を、監視しているチャンネルの分として記録し直す場合は、監視外から外す
+        ext = self.channels.get(EXTERNAL)
+        if key != EXTERNAL and ext and video["id"] in ext.get("videos", {}):
+            del ext["videos"][video["id"]]
+            self.dirty.add(EXTERNAL)
 
     def get(self, vid: str) -> dict | None:
         rec = self.index.get(vid)
@@ -290,7 +295,11 @@ class Ledger:
         self.docs[pid]["title"] = title
         return self.docs[pid]
 
-    def apply_snapshot(self, pid: str, title: str, items: list[dict], today: str) -> None:
+    def apply_snapshot(self, pid: str, title: str, items: list[dict], today: str) -> list[str]:
+        """再生リストの今の中身を台帳に反映する。前回のバックアップのあとに新しく入った動画のIDを返す
+        （初めてバックアップする再生リストでは空）。"""
+        known_before = pid in self.docs and bool(self.docs[pid].get("last_synced"))
+        new: list[str] = []
         doc = self.doc(pid, title)
         doc.pop("deleted_since", None)
         doc["last_synced"] = today
@@ -300,6 +309,8 @@ class Ledger:
             if vid in seen:
                 continue
             seen.add(vid)
+            if vid not in doc["items"] and known_before:
+                new.append(vid)
             e = doc["items"].setdefault(vid, {"video_id": vid, "first_seen": today})
             unavailable = it.get("privacy") in ("private", "privacyStatusUnspecified") \
                 or it.get("title") in UNAVAILABLE_TITLES
@@ -325,6 +336,7 @@ class Ledger:
                 e["missing_since"] = today
                 e.pop("item_id", None)
                 e.pop("position", None)
+        return new
 
     def mark_deleted_playlists(self, alive: set[str], today: str) -> list[str]:
         gone = []

@@ -398,6 +398,8 @@ def validate(cfg: Config) -> list[str]:
             errors.append(f"ignore_playlists[{i}]: 再生リストは id と name の両方が必要です")
         elif not PL_RE.match(r["id"]):
             errors.append(f"ignore_playlists[{i}]: 再生リストIDの形式が違います: {r['id']}")
+    # 自動で occasional に追加しないチャンネル（{id, name} のリスト）
+    check_channels(cfg.raw.get("ignore_channels"), "ignore_channels", allow_names=False)
     ignored = ignored_playlist_ids(cfg)
     if ignored:
         for pl in declared_playlists(cfg):
