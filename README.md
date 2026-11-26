@@ -96,7 +96,7 @@ Google Cloud の OAuth 設定の代わりに、Google Apps Script で「YouTube 
 URL だけが漏れても、トークンは受け取れません（GitHub の OIDC トークンが必要なため）。URL を秘密にしているのは、無関係な人に叩かれないようにするためです。
 
 ### 4. 設定ファイル
-今の再生リストから下書きを作れます。Actions →「playlist-tools」→「Run workflow」で、command に `draft_config` を選んで実行すると、`config.draft.yaml` がリポジトリにコミットされます（サマリーにも表示されます）。YouTube を読み書きするコマンドは、Apps Script の認証のため GitHub Actions の中でだけ動きます。
+今の再生リストから下書きを作れます。Actions →「playlist-tools」→「Run workflow」で、command に `draft_config` を選んで実行すると、`config.draft.yaml` ができます。実行結果の画面の **Artifacts**（`config-draft`）からダウンロードできます（7日で消えます。サマリーにも表示されます）。下書きはリポジトリにはコミットしません。YouTube を読み書きするコマンドは、Apps Script の認証のため GitHub Actions の中でだけ動きます。
 
 手元では、整合性の確認と整形だけを行います。
 ```bash

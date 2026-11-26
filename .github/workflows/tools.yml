@@ -9,7 +9,7 @@ on:
         description: "実行するコマンド"
         type: choice
         options:
-          - "draft_config（今の再生リストから config.draft.yaml を作る）"
+          - "draft_config（今の再生リストから config.draft.yaml を作る。成果物としてダウンロード）"
           - "pull_config（再生リスト名の更新と、未登録の再生リストを ignore_playlists へ）"
           - "pull_config --channel-names（チャンネルの name も更新）"
           - "restore（バックアップから消えた曲を戻す）"
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write   # config.yaml・台帳・下書きを push する
+      contents: write   # config.yaml・台帳を push する
       id-token: write   # GitHub の OIDC トークンで Apps Script からトークンを受け取る
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,14 +80,23 @@ jobs:
               ;;
             *) echo "::error::不明なコマンド: $COMMAND"; exit 1 ;;
           esac
+      # 下書きはコミットしない（.gitignore の対象）。実行結果の画面の Artifacts からダウンロードする
+      - name: Upload draft
+        if: ${{ startsWith(inputs.command, 'draft_config') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: config-draft
+          path: config.draft.yaml
+          if-no-files-found: error
+          retention-days: 7
       - name: Commit
-        if: ${{ !inputs.dry_run || startsWith(inputs.command, 'draft_config') }}
+        if: ${{ !inputs.dry_run && !startsWith(inputs.command, 'draft_config') }}
         env:
           COMMAND: ${{ inputs.command }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for p in config.yaml config.draft.yaml data; do if [ -e "$p" ]; then git add -A "$p"; fi; done
+          for p in config.yaml data; do if [ -e "$p" ]; then git add -A "$p"; fi; done
           git diff --cached --quiet || git commit -m "tools: ${COMMAND%%（*} $(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M')"
           git pull --rebase --autostash origin main
           git push

@@ -165,7 +165,7 @@ def main(argv=None):
         print(f"\n（ドライラン：{a.config} は変更していません）")
     elif cfg.dirty:
         cfg.save()
-        print(f"\n{a.config} を更新しました。git diff で確認してからコミットしてください。")
+        print(f"\n{a.config} を更新しました（playlist-tools ではこのあと自動でコミットします。手元なら git diff で確認してからコミット）。")
     print(f"クォータ使用量: {yt.used}")
 
 

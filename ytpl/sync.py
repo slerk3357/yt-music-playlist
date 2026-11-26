@@ -1,7 +1,7 @@
 """毎日の同期処理本体。  python -m ytpl.sync [--dry-run]
 
 このプログラムは再生リストへの「追加」だけを行い、動画の削除は一切しない。
-追加の提案は、Worker の画面で「追加」を選んだ曲だけを次の実行で再生リストに入れる（data/decisions.py）。
+追加の提案は、Worker の画面で「追加」を選んだ曲だけを次の実行で再生リストに入れる（記録は data/decisions.yaml、処理は ytpl/decisions.py）。
 config.yaml に書き戻すのは「新しく作った再生リストのID」と「昇格した曲」だけで、
 ruamel.yaml の round-trip によりコメント・クオート・並び順は保たれる。
 """
