@@ -343,3 +343,28 @@ test("stateLabel", () => {
   assert.equal(stateLabel({ action: "add", applied_at: "x", result: "failed", error: "videoNotFound" }),
     "追加できませんでした（videoNotFound）");
 });
+
+test("「その他の曲に追加」のボタンと決定", async () => {
+  setupWorld();
+  const env = { ...ENV, DECISIONS: fakeNamespace() };
+  const sug = { ...SUG2, misc: { id: "PLmiscX", name: "その他の曲" },
+    groups: [{ ...SUG2.groups[0], items: [
+      { ...SUG2.groups[0].items[0], in: ["夜の曲"] },
+      { ...SUG2.groups[0].items[1], in: ["その他の曲"] } ] }] };   // すでに「その他の曲」にある曲にはボタンを出さない
+  const w = createHandler(INDEX_DATA, sug);
+  const html = await (await w.fetch(new Request("https://mix.example/suggestions"), env, CTX)).text();
+  assert.equal((html.match(/class="act misc" data-a="misc">「その他の曲」に追加/g) || []).length, 1);
+  const res = await w.fetch(post("/api/decide", { target: "PLother", video: VID(1), action: "misc" }), env, CTX);
+  assert.equal(res.status, 200);
+  const r = await res.json();
+  assert.equal(r.record.action, "misc");
+  assert.equal(r.label, "「その他の曲」に追加予定（次回の同期で反映）");
+  // その他の曲の再生リストがないときは受け付けない
+  const w2 = createHandler(INDEX_DATA, SUG2);
+  assert.equal((await w2.fetch(post("/api/decide", { target: "PLother", video: VID(2), action: "misc" }), env, CTX)).status, 400);
+  assert.doesNotMatch(await (await w2.fetch(new Request("https://mix.example/suggestions"), env, CTX)).text(), /class="act misc"/);
+});
+
+test("stateLabel：その他の曲に追加", () => {
+  assert.equal(stateLabel({ action: "misc", applied_at: "x", result: "added" }), "「その他の曲」に追加済み");
+});

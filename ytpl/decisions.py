@@ -22,6 +22,8 @@ from pathlib import Path
 from .store import _plain, dump_yaml, load_yaml
 
 APPLIED_FIELDS = ("applied_at", "result", "error")
+# 再生リストに入れる決定。add：提案先に追加 / misc：提案先ではなく「その他の曲」に追加（その提案先にはもう提案しない）
+ADD_ACTIONS = ("add", "misc")
 
 
 class RemoteError(Exception):
@@ -119,7 +121,8 @@ class Decisions:
         return n
 
     def pending_adds(self) -> list[dict]:
-        return [r for r in self.records.values() if r.get("action") == "add" and not r.get("applied_at")]
+        """まだ反映していない「追加」と「その他の曲に追加」（action が misc）。"""
+        return [r for r in self.records.values() if r.get("action") in ADD_ACTIONS and not r.get("applied_at")]
 
     def pending_rejects(self) -> list[dict]:
         return [r for r in self.records.values() if r.get("action") == "reject" and not r.get("applied_at")]
@@ -139,7 +142,7 @@ class Decisions:
             return False
         if r.get("action") == "reject":
             return True
-        return r.get("action") == "add" and r.get("result") != "failed"
+        return r.get("action") in ADD_ACTIONS and r.get("result") != "failed"
 
     def ack_payload(self) -> list[dict]:
         out = []

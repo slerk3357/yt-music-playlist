@@ -51,6 +51,7 @@ class FakeYouTube(YouTube):
         return list(self.albums.get(cid, {}))
 
     releases = {}            # チャンネルID -> {リリースの再生リストID: [動画ID]}（channel_playlists に出る）
+    members_lists = {}       # チャンネルID -> [メンバー限定の動画ID]（UUMO…。ないチャンネルは 404）
 
     def uploads_ids(self, ids):
         self._spend("list")
@@ -75,6 +76,14 @@ class FakeYouTube(YouTube):
 
     def playlist_pages(self, pid):
         from ytpl.api import ApiError
+        if pid.startswith("UUMO"):
+            cid = "UC" + pid[4:]
+            if cid not in self.members_lists:
+                self._spend("list")
+                raise ApiError(404, "playlistNotFound")
+            self._spend("list")
+            yield [{"item_id": f"m-{i}", "video_id": i} for i in self.members_lists[cid]]
+            return
         if pid.startswith("UU") and "UC" + pid[2:] in self.topic_channels:
             self._spend("list")
             raise ApiError(404, "playlistNotFound")
@@ -726,3 +735,33 @@ def test_probe_channel_reports_sources(tmp_path):
     assert "- r1:" in md and "OLAK5uy_rel1" in md.split("- r1:")[1].split("\n")[1]
     assert "- zz: 動画情報を取得できません" in md
     assert {k: len(v["items"]) for k, v in yt.pl.items()} == before      # 何も書き込まない
+
+
+def test_misc_decision_adds_to_misc_playlist(tmp_path):
+    """「その他の曲に追加」にした曲は「その他の曲」に入れ、その提案先にはもう提案しない。"""
+    yt = setup(tmp_path)
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    run(yt=yt, now=day(1, 11), remote=None, **kw(tmp_path))
+    assert "【cover】夜の曲 / ボブ" in (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+    import json
+    sj = json.loads((tmp_path / "data/mix/suggestions.json").read_text(encoding="utf-8"))
+    assert sj["misc"] == {"id": "PLmisc", "name": "その他の曲"}
+    remote = FakeRemote([D_("PLbob", "b1", "misc")])
+    text = run(yt=yt, now=day(1, 12), remote=remote, **kw(tmp_path))
+    assert "b1" in titles(yt)["その他の曲"] and "b1" not in titles(yt)["ボブチャンネル"]
+    assert "[提案から追加] その他の曲 ← 【cover】夜の曲 / ボブ" in text
+    assert remote.acks[-1][0]["result"] == "added"
+    assert "【cover】夜の曲 / ボブ" not in (tmp_path / "reports/suggestions.md").read_text(encoding="utf-8")
+
+
+def test_members_only_list_marks_videos(tmp_path):
+    """メンバー限定の一覧（UUMO…）にある動画は、membership: true でなければ入れない。"""
+    yt = setup(tmp_path)
+    yt.v["m1"] = V("m1", "海の歌", A, "01-03")       # タイトルに表記はないが、メンバー限定の一覧にある
+    yt.members_lists = {A: ["m1"]}
+    run(yt=yt, now=day(1, 10), remote=None, **kw(tmp_path))
+    assert "m1" not in titles(yt)["アリスチャンネル"]
+    from ytpl.store import Catalog
+    cat = Catalog(tmp_path / "data/catalog")
+    assert cat.channels[A]["videos"]["m1"]["members"] is True
+    assert cat.channels[B].get("members_missing") == "2026-01-10"        # 一覧がないチャンネルは7日ごとに試す

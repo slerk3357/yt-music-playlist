@@ -4,6 +4,7 @@
 
 調べる取得元
   1. アップロード一覧（UU…）
+  1b. メンバー限定の動画の一覧（UUMO…。非公式。読めるかどうかも分かる）
   2. チャンネル情報に書かれたアップロード一覧のID
   3. チャンネルページの棚（種類・題名と、並ぶ再生リスト）
   4. チャンネルが公開している再生リストの一覧（リリース OLAK5uy_… を含むか）
@@ -19,7 +20,7 @@ import sys
 from collections import Counter
 
 from .api import ApiError, YouTube, uploads_playlist_id
-from .sync import RELEASE_PREFIX
+from .sync import MEMBERS_PREFIX, RELEASE_PREFIX
 
 
 def _items(yt: YouTube, pid: str, max_pages: int) -> tuple[list[dict] | None, str | None, bool]:
@@ -57,6 +58,7 @@ def probe_channel(yt: YouTube, cid: str, videos: list[str], extra_playlists: lis
 
     uu = uploads_playlist_id(cid)
     found(uu, "1. アップロード一覧", "アップロード一覧")
+    found(MEMBERS_PREFIX + cid[2:], "1b. メンバー限定の一覧（非公式）", "メンバー限定の一覧")
     try:
         rel = yt.uploads_id(cid)
     except ApiError as e:

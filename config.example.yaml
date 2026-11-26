@@ -46,8 +46,10 @@ top_favorites:
       - {id: "UCaaaaaaaaaaaaaaaaaaaaaa", name: "歌い手A"}
       - {id: "UCbbbbbbbbbbbbbbbbbbbbbb", name: "歌い手A - Topic"}
     playlist: {id: "PLexample03xxxxxxxxxxxxxxxxxxxxxxxx", name: "歌い手Aチャンネル"}
+    # membership: true                       # メンバーシップに入っているなら、メンバー限定の動画も扱う（先行公開は除く）
     other:
       playlist: {id: "PLexample04xxxxxxxxxxxxxxxxxxxxxxxx", name: "その他歌い手A"}
+      # exclude_channels: ["ユニットU"]      # 別名義・所属ユニットのチャンネルは「その他歌い手A」の候補にしない
     specials:
       # 作曲者Bが公開した、歌い手Aがボーカルの曲（「その他歌い手A」からは除外される）
       # published_by は作曲者Bの動画だけが対象（歌い手A本人の動画は含めない）

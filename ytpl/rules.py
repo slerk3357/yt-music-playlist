@@ -57,6 +57,46 @@ def is_off_vocal(title: str | None) -> bool:
     return bool(OFF_VOCAL_RE.search(unicodedata.normalize("NFKC", title or "")))
 
 
+# 曲名のキーを作るときに、オフボーカルの表記を前後の区切り（「 -instrumental-」の - など）ごと取り除く。
+# 通常版と同じ曲として扱うため（「曲名 -instrumental-」が「曲名instrumental」にならないように）
+OFF_VOCAL_STRIP_RE = re.compile(
+    r"[\s\-‐–—~〜_]*(?:" + OFF_VOCAL_RE.pattern + r")(?:\s*ver(?:sion)?\.?)?[\s\-‐–—~〜_]*", re.I)
+
+
+def strip_off_vocal(title: str | None) -> str:
+    t = unicodedata.normalize("NFKC", title or "")
+    return OFF_VOCAL_STRIP_RE.sub(" ", t).strip() if OFF_VOCAL_RE.search(t) else t
+
+
+# メンバー限定の動画（API に公開の項目がないため、タイトルの表記と、取れればメンバー限定一覧 UUMO… で見分ける）
+MEMBERS_RE = re.compile(r"メン限|メンバー限定|メンバーシップ限定|メンバー先行|members?[\s-]*only|membership[\s-]*only", re.I)
+# メンバー限定の先行公開（いずれ一般公開されるので、メンバーシップに入っていても入れない）
+EARLY_ACCESS_RE = re.compile(r"先行公開|先行配信|先行視聴|先行解禁|メンバー先行|メン限先行|early[\s-]*access", re.I)
+
+
+def is_members_only(v: dict) -> bool:
+    return bool(v.get("members")) or bool(MEMBERS_RE.search(unicodedata.normalize("NFKC", v.get("title") or "")))
+
+
+def is_early_access(v: dict) -> bool:
+    return bool(EARLY_ACCESS_RE.search(unicodedata.normalize("NFKC", v.get("title") or "")))
+
+
+def member_channels(cfg: Config) -> set[str]:
+    """membership: true の項目のチャンネル（メンバー限定の動画も扱う）。"""
+    out = set()
+    for _, _, _, e in tier_entries(cfg):
+        if e.get("membership") is True:
+            out |= set(ids(e.get("channels")))
+    return out
+
+
+# カバー・歌ってみたの表記（TOPIC音源の重複判定で、本人の公式の動画とカバーを区別するため）
+COVER_RE = re.compile(r"cover|covered|カバー|歌ってみた|弾いてみた|うたってみた", re.I)
+# 「feat. 名前」「ft. 名前」「× 名前」などのクレジット
+FEAT_RE = re.compile(r"(?:feat\.?|ft\.|featuring|with|×|x\s)\s*([^/|()\[\]【】「」『』]+)", re.I)
+
+
 def is_music(v: dict, mcfg: dict) -> bool:
     title = nfkc(v.get("title"))
     if has_keyword(title, mcfg["exclude_keywords"]):
@@ -111,7 +151,7 @@ def is_art_track(v: dict) -> bool:
 
 def song_key(v: dict, artists: set[str] = frozenset()) -> tuple[str, str]:
     """重複判定に使う (曲名, バージョン)。曲名はアーティスト名の部分を除いた候補をつなげたもの。"""
-    segs = titles.segments(v.get("title"), artists | {titles.artist_key(v.get("channel_title"))})
+    segs = titles.segments(strip_off_vocal(v.get("title")), artists | {titles.artist_key(v.get("channel_title"))})
     base = "|".join(k for k, _ in segs) or nz(v.get("title"))
     return base, version_tag(v.get("title") or "")
 
@@ -378,6 +418,9 @@ def validate(cfg: Config) -> list[str]:
                 errors.append(f"{w}.other: playlist がありません")
             else:
                 check_pl(other.get("playlist"), f"{w}.other.playlist", need_id=True)
+                check_channels(other.get("exclude_channels"), f"{w}.other.exclude_channels")
+        if "membership" in e and not isinstance(e.get("membership"), bool):
+            errors.append(f"{w}.membership: true か false で書いてください")
         for j, sp in enumerate(e.get("specials") or []):
             ws = f"{w}.specials[{j}]"
             legacy(sp, LEGACY_SPECIAL, f"{ws}.")
@@ -433,6 +476,8 @@ class Index:
         self.by_ref: dict[str, set[str]] = defaultdict(set)
         self._grams: dict[str, set[str]] | None = None
         videos = list(videos)
+        members_ok = member_channels(cfg)
+        self.members_skipped: set[str] = set()
         # 既知のアーティスト名：設定の名前＋監視しているチャンネルの名前
         self.artists = known_artists(cfg) | {
             k for k in (titles.artist_key(v.get("channel_title")) for v in videos) if len(k) >= 2}
@@ -440,9 +485,13 @@ class Index:
             vid = v["id"]
             if vid in ignore or not is_music(v, mcfg):
                 continue
+            # メンバー限定：membership: true のチャンネルの動画だけ扱う。先行公開はどの場合も扱わない
+            if is_members_only(v) and (v.get("channel_id") not in members_ok or is_early_access(v)):
+                self.members_skipped.add(vid)
+                continue
             t = nfkc(v.get("title"))
             x = t + ("\n" + nfkc(v.get("description")) if use_desc else "")
-            segs = titles.segments(v.get("title"), self.artists | {titles.artist_key(v.get("channel_title"))})
+            segs = titles.segments(strip_off_vocal(v.get("title")), self.artists | {titles.artist_key(v.get("channel_title"))})
             key = ("|".join(k for k, _ in segs) or nz(t), version_tag(v.get("title") or ""))
             rec = Rec(v, v.get("channel_id"), t, nz(t), nz(x), key, [k for k, _ in segs], [d for _, d in segs],
                       is_art_track(v), bool(MV_RE.search(t)), is_off_vocal(v.get("title")))
@@ -605,6 +654,19 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         by_name = (idx.alias_hits(e.get("aliases")) - own - verified) if e.get("aliases") else set()
         by_name |= weak
 
+        # TOPIC音源で、別のチャンネルが出した同じ曲の公式の動画（この人がクレジットされたもの）があるものは入れない。
+        # クレジットとみなすのは、監視しているチャンネルの動画で @ハンドル/ID の記載があるか、
+        # タイトルの feat. 等にこの人の名前があるもの。カバー・歌ってみたは除く（同じ曲名の別の人の版と区別するため）
+        names = alias_keys([e.get("name")] + list(e.get("aliases") or []))
+        credited = {v for v in verified if not COVER_RE.search(idx.r[v].t)}
+        for v in (by_name - weak) & monitored:
+            r = idx.r[v]
+            if not COVER_RE.search(r.t) and any(k and k in nz(m) for m in FEAT_RE.findall(r.t) for k in names):
+                credited.add(v)
+        official_keys = {idx.r[v].key for v in credited if not idx.r[v].art and not idx.r[v].off and idx.r[v].key[0]}
+        art_dups = {v for v in own if idx.r[v].art and idx.r[v].key in official_keys}
+        own = own - art_dups
+
         # 特別再生リスト：対象範囲のうち、書かれた条件をすべて満たすもの
         in_specials = set()
         for j, sp in enumerate(e.get("specials") or []):
@@ -661,6 +723,8 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
         op = other.get("playlist") or {}
         if op.get("id"):
             rest = (verified | by_name) - in_specials
+            # 別名義・所属ユニットなどのチャンネル（この人の関係曲として「その他○○」には出さない）
+            rest -= idx.channels(chan_ids(cfg, other.get("exclude_channels")))
             if other.get("exclude_keywords"):
                 rest -= idx.title_has(other["exclude_keywords"], rest)
             pl = _pl(op, f"other:{key}:{i}", False, (key, i, "other", "playlist"), creatable=False)
@@ -683,7 +747,9 @@ def build_targets(cfg: Config, idx: Index, roles: dict[str, dict],
             r = idx.r[vid]
             if any(k in r.segs for k in keys):
                 exact.add(vid)
-            elif any(titles.word_match(n, d) for n in names for d in r.segd if nz(n) in nz(d)):
+            elif any(titles.word_match(n, d) for n in names for d in r.segd[:1] if nz(n) in nz(d)):
+                # 部分一致は、曲名の位置（最初の区切り）だけ。2番目以降はアーティスト名の位置のことが多く、
+                # 「曲名 - アーティスト名 / 歌った人」の形のカバーで、アーティスト名に曲名が含まれると誤って当たるため
                 partial.add(vid)
         if s.get("exclude_keywords"):
             exact -= idx.title_has(s["exclude_keywords"], exact)

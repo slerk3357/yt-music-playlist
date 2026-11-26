@@ -24,7 +24,7 @@
 // 非公開リポジトリの data/mix/index.json を Worker に組み込んだもの。毎日の同期で索引が
 // 更新されると、Cloudflare が自動でビルドし直す（ビルドの監視パスに data/mix/index.json を入れる）。
 
-import { ACTIONS, stateLabel } from "./decisions.js";
+import { ACTIONS, ADD_ACTIONS, isFixed, stateLabel } from "./decisions.js";
 import {
   MAX_VIDEOS, YT_PACKAGE, escapeHtml, intentUrl, musicUrl, parseWatchRedirect, pickMix, safeEqual, watchVideosUrl,
   youtubeUrl,
@@ -55,7 +55,7 @@ li{list-style:none}ul{padding:0}small{color:#666}h2{margin-top:1.5em;font-size:1
 .play img{width:100%;height:100%;object-fit:cover;display:block}.play span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:2em;text-shadow:0 0 6px #000}
 .item iframe{width:min(100%,480px);aspect-ratio:16/9;border:0;flex:1 1 320px}
 .actions{margin-top:6px}.actions button{margin:4px 6px 4px 0;padding:8px 14px;border-radius:8px;border:1px solid #888;background:#fff;font-size:1em}
-.actions .add{background:#e7f3e7}.actions .reject{background:#f6e6e6}.actions button:disabled{opacity:.45}</style>`;
+.actions .add{background:#e7f3e7}.actions .misc{background:#eef0fb}.actions .reject{background:#f6e6e6}.actions button:disabled{opacity:.45}</style>`;
 
 /** 提案先の再生リストID -> {group, n, items: Map(動画ID -> 提案)} */
 function suggestionIndex(sug) {
@@ -77,7 +77,7 @@ function undecided(g, decisions) {
   if (!decisions || !g.id) return g.items;
   return g.items.filter((it) => {
     const r = decisions.get(`${g.id}:${it.id}`);
-    return !r || r.action === "none" || (r.action === "add" && r.applied_at && !["added", "already"].includes(r.result));
+    return !r || r.action === "none" || (ADD_ACTIONS.includes(r.action) && r.applied_at && !isFixed(r));
   });
 }
 
@@ -159,7 +159,9 @@ function suggestionsPage(sug, decisions) {
     const items = g.items.map((it) => {
       const others = (targetsOf.get(it.id) || []).filter((x) => x !== g.name);
       const rec = decisions && g.id ? decisions.get(`${g.id}:${it.id}`) : null;
-      const fixed = rec && rec.action === "add" && rec.applied_at && ["added", "already"].includes(rec.result);
+      const fixed = isFixed(rec);
+      // 「その他の曲に追加」：その他の曲の再生リストがあり、提案先がその他の曲ではなく、まだ入っていない曲だけ
+      const canMisc = !!(sug.misc && sug.misc.id && g.id !== sug.misc.id && !(it.in || []).includes(sug.misc.name));
       const vid = escapeHtml(it.id);
       const canDecide = !!(g.id && decisions);
       return `<li class="item" data-t="${escapeHtml(g.id || "")}" data-v="${vid}" data-action="${escapeHtml(rec?.action || "")}" data-fixed="${fixed ? 1 : 0}">
@@ -169,14 +171,16 @@ function suggestionsPage(sug, decisions) {
 <br><small>理由: ${escapeHtml(it.reason)}${
         it.in && it.in.length ? `・今入っている: ${escapeHtml(it.in.join("、"))}` : ""}${
         others.length ? `・ほかの提案先: ${escapeHtml(others.join("、"))}` : ""}</small>
-${canDecide ? `<div class="actions"><button class="act add" data-a="add">「${name}」に追加</button><button class="act reject" data-a="reject">却下</button>
+${canDecide ? `<div class="actions"><button class="act add" data-a="add">「${name}」に追加</button>${
+        canMisc ? `<button class="act misc" data-a="misc">「${escapeHtml(sug.misc.name)}」に追加</button>` : ""}<button class="act reject" data-a="reject">却下</button>
 <button class="undo" hidden>取り消し</button> <small class="state">${escapeHtml(stateLabel(rec))}</small></div>` : ""}</div></li>`;
     }).join("");
     return `<section id="g${n}" class="group"><h2>提案先: ${name}（${g.items.length} 曲）</h2>
 <p><small class="left"></small></p><div>${target}</div><div>${opens}</div><ul>${items}</ul></section>`;
   }).join("");
   const note = decisions
-    ? `<p><small>曲ごとに ▶ で再生して確かめ、<b>追加</b>か<b>却下</b>を選びます。追加にした曲は、<b>次回の同期</b>（毎朝）で提案先の再生リストに入ります。
+    ? `<p><small>曲ごとに ▶ で再生して確かめ、<b>追加</b>・<b>その他の曲に追加</b>・<b>却下</b>のどれかを選びます。
+「その他の曲に追加」にした曲は、提案先ではなく「その他の曲」に入り、その提案先にはもう提案しません。追加にした曲は、<b>次回の同期</b>（毎朝）で提案先の再生リストに入ります。
 却下にした曲は、その提案先にはもう提案しません。どちらも選ばなかった曲は、次回も提案されます。
 追加の反映前と、却下は「取り消し」で戻せます（反映済みの追加は、このシステムでは消せません）。</small></p>`
     : `<p><small><b>決定の保存先（Durable Object）が設定されていないため、追加・却下は選べません。</b>README の「追加の提案の決定を、毎日の同期に渡す」を確認してください。</small></p>`;
@@ -298,7 +302,7 @@ async function handle(request, env, ctx, index, sug, sugIndex) {
   const service = parts[0] === "api" && parts[1] === "sync";
   const denied = await authorize(env, ctx, service, request);
   if (denied) return text(denied, 403);
-  if (parts[0] === "api") return api(request, env, ctx, url, parts, sugIndex);
+  if (parts[0] === "api") return api(request, env, ctx, url, parts, sugIndex, sug);
   if (request.method !== "GET" && request.method !== "HEAD") return text("Method Not Allowed", 405);
 
   const html = (body) => new Response(body, {
@@ -343,7 +347,7 @@ async function handle(request, env, ctx, index, sug, sugIndex) {
  *   GET  /api/sync/decisions      毎日の同期が決定を読む（同期用のサービストークンが必要）
  *   POST /api/sync/ack            毎日の同期が反映結果を返す {results: [...]}（同期用のサービストークンが必要）
  */
-async function api(request, env, ctx, url, parts, sugIndex) {
+async function api(request, env, ctx, url, parts, sugIndex, sug) {
   const store = decisionStore(env);
   if (!store) return json({ error: "決定の保存先（DECISIONS）が設定されていません" }, 503);
   const route = parts.slice(1).join("/");
@@ -368,7 +372,8 @@ async function api(request, env, ctx, url, parts, sugIndex) {
     }
     const body = await request.json().catch(() => null);
     const { target, video, action } = body || {};
-    if (!ACTIONS.includes(action)) return json({ error: "action は add / reject / none のどれかです" }, 400);
+    if (!ACTIONS.includes(action)) return json({ error: "action は add / misc / reject / none のどれかです" }, 400);
+    if (action === "misc" && !(sug.misc && sug.misc.id)) return json({ error: "「その他の曲」の再生リストがありません" }, 400);
     // 今の提案に含まれている曲と提案先だけを受け付ける
     const g = sugIndex.get(String(target || ""));
     const it = g?.items.get(String(video || ""));

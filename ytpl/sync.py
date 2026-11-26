@@ -45,7 +45,7 @@ def _label(v: dict | None, vid: str) -> str:
     return f"{v.get('title')} / {v.get('channel_title') or '?'} (https://youtu.be/{vid})"
 
 
-def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: datetime) -> None:
+def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: datetime, misc: dict | None = None) -> None:
     """追加の提案を、読む用（Markdown）と Worker 用（JSON）に書き出す。"""
     import json
 
@@ -53,7 +53,7 @@ def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: da
     body = [f"# 追加の提案 {now:%Y-%m-%d %H:%M} JST", "",
             "すでに別の再生リストに入っている曲や、お気に入りの曲の確認候補のうち、"
             "まだ入れていない（消してもいない）ものです。自動では追加しません。",
-            "ミックスAPI（Worker）の「追加の提案」の画面で、曲ごとに「追加」か「却下」を選んでください。"
+            "ミックスAPI（Worker）の「追加の提案」の画面で、曲ごとに「追加」「その他の曲に追加」「却下」を選んでください。"
             "追加にした曲は次回の同期で再生リストに入り、却下にした曲はその提案先にはもう提案しません"
             "（どちらも選ばなかった曲は、次回も提案されます）。", ""]
     for g in groups:
@@ -67,7 +67,8 @@ def write_suggestions(md_path: Path, json_path: Path, suggestions: dict, now: da
     md_path.write_text("\n".join(body) + "\n", encoding="utf-8")
     json_path.parent.mkdir(parents=True, exist_ok=True)
     out = {"version": 1, "generated_at": now.isoformat(timespec="seconds"), "groups": groups}
-    lines = ["{", f'  "version": 1,', f'  "generated_at": {json.dumps(out["generated_at"])},', '  "groups": [']
+    lines = ["{", f'  "version": 1,', f'  "generated_at": {json.dumps(out["generated_at"])},',
+             f'  "misc": {json.dumps(misc, ensure_ascii=False)},', '  "groups": [']
     gs = [json.dumps(g, ensure_ascii=False, separators=(",", ":")) for g in groups]
     lines += [f"    {g}{',' if n < len(gs) - 1 else ''}" for n, g in enumerate(gs)]
     lines += ["  ]", "}"]
@@ -125,6 +126,7 @@ def _collect(pages, known: set, incremental: bool) -> list[str]:
 
 
 RELEASE_PREFIX = "OLAK5uy_"   # リリース（アルバム・シングル）の再生リスト
+MEMBERS_PREFIX = "UUMO"        # メンバー限定の動画の一覧（非公式。UU… の UU を置き換えたもの）
 PLAYLIST_REFRESH_DAYS = 30     # 件数が変わらなくても、この日数ごとに中身を読み直す
 
 
@@ -170,6 +172,28 @@ def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Rep
                 rep.add("警告", f"チャンネル {cid} のアップロード一覧を取得できません: {e.reason or e.status}")
             else:
                 ch["uploads_missing"] = today
+
+    # 1b. メンバー限定の動画の一覧（UUMO…。非公式の一覧で、読めない場合は7日ごとに試し直す）。
+    #     ここにある動画には members の印を付ける（membership: true の項目のチャンネルの動画だけ扱う）
+    members: set[str] = set()
+    if not (ch.get("members_missing") or "") > week_ago:
+        try:
+            for page in yt.playlist_pages(MEMBERS_PREFIX + cid[2:]):
+                ids_ = [x["video_id"] for x in page]
+                fresh = [i for i in ids_ if not (catalog.index.get(i) or {}).get("members")]
+                members.update(ids_)
+                if ch.get("members_read") and not fresh:
+                    break   # 2回目からは、印の付いていない動画がなくなったところで止める
+            ch["members_read"] = today
+            ch.pop("members_missing", None)
+            for i in members:
+                rec = catalog.index.get(i)
+                if rec is not None and not rec.get("members"):
+                    rec["members"] = True
+                    catalog.dirty.add(rec.get("channel_id") or cid)
+            take(sorted(members), trusted)
+        except ApiError:
+            ch["members_missing"] = today
 
     # 2. チャンネル情報に書かれたアップロード一覧
     try:
@@ -242,6 +266,8 @@ def update_channel(yt: YouTube, catalog: Catalog, cid: str, today: str, rep: Rep
     trusted_set = set(trusted)
     for v in yt.videos(trusted + listed):
         owner = v.get("channel_id")
+        if v["id"] in members:
+            v["members"] = True
         if v["id"] in trusted_set:
             catalog.add(cid, v)
         elif owner in owners:
@@ -337,8 +363,9 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
             rp.parent.mkdir(parents=True, exist_ok=True)
             rp.write_text(text, encoding="utf-8")
             if not create_only:
+                misc = {"id": pids["misc"], "name": fixed["misc"].name} if pids.get("misc") else None
                 write_suggestions(rp.with_name("suggestions.md"), data / "mix" / "suggestions.json",
-                                  suggestions, now)
+                                  suggestions, now, misc=misc)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write(text + "\n")
@@ -535,6 +562,7 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
     allowed = {pids[tg.pl.key]: tg.cand | tg.auto for tg in targets if pids.get(tg.pl.key)}
     planned = {(pl.key, vid) for _, _, pl, vid in plan_items}
     decided: dict[tuple[str, str], dict] = {}
+    misc_pl, misc_pid = fixed["misc"], pids.get("misc")
     for rec in decisions.pending_adds():
         pid, vid = rec["target"], rec["video"]
         pl = by_pid.get(pid)
@@ -543,14 +571,22 @@ def run(config_path="config.yaml", data_dir="data", report_path="reports/latest.
                 decisions.mark(rec, "invalid", now.isoformat(timespec="seconds"), "提案先が管理対象の再生リストではありません")
             rep.add("提案から追加できなかった曲", f"{rec.get('target_name') or pid} ← {rec.get('title') or vid}: 提案先が管理対象ではありません")
             continue
-        if ledger.status(pid, vid) == "present":
-            if not dry_run:
-                decisions.mark(rec, "already", now.isoformat(timespec="seconds"))
-            continue
         if vid not in allowed.get(pid, set()):
             if not dry_run:
                 decisions.mark(rec, "invalid", now.isoformat(timespec="seconds"), "今の提案にない曲です")
             rep.add("提案から追加できなかった曲", f"{pl.name} ← {rec.get('title') or vid}: 今の提案にない曲です")
+            continue
+        if rec.get("action") == "misc":
+            # 「その他の曲に追加」：提案先ではなく「その他の曲」に入れる
+            if not misc_pid:
+                if not dry_run:
+                    decisions.mark(rec, "invalid", now.isoformat(timespec="seconds"), "「その他の曲」の再生リストがありません")
+                rep.add("提案から追加できなかった曲", f"{misc_pl.name} ← {rec.get('title') or vid}: 再生リストがありません")
+                continue
+            pl, pid = misc_pl, misc_pid
+        if ledger.status(pid, vid) == "present":
+            if not dry_run:
+                decisions.mark(rec, "already", now.isoformat(timespec="seconds"))
             continue
         decided[(pid, vid)] = rec
         if (pl.key, vid) in planned:

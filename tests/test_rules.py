@@ -388,3 +388,111 @@ favorites:
     assert sp.cand == {"b_old", "x_now", "x_id"}
     assert sp.why["b_old"] == "過去の @ハンドルだけで一致"
     assert "監視していないチャンネル" in sp.why["x_now"]
+
+
+def test_off_vocal_key_with_dash_marks(tmp_path):
+    """「曲名 -instrumental-」も通常版と同じ曲として扱い、通常版があれば入れない。"""
+    A, AT = C("a"), C("atopic")
+    for t in ["曲A -instrumental-", "曲A -Instrumental ver.-", "曲A ~off vocal~", "曲A（Instrumental）"]:
+        assert rules.song_key({"title": t, "channel_title": "A - Topic"})[0] == "曲a", t
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}, {{id: "{AT}", name: "A - Topic"}}]
+    playlist: {{name: "Aチャンネル"}}
+    include_off_vocal: true
+""")
+    art = "Provided to YouTube by Label"
+    vs = [V("n", "曲A", AT, desc=art, ch_title="A - Topic"), V("i", "曲A -instrumental-", AT, desc=art, ch_title="A - Topic"),
+          V("i2", "曲B -instrumental-", AT, desc=art, ch_title="A - Topic")]
+    t, _ = targets(cfg, vs, {})
+    assert t["Aチャンネル"].auto == {"n", "i2"}       # 通常版のない曲Bのオフボーカルだけ入れる
+
+
+def test_topic_track_skipped_when_credited_official_video_exists(tmp_path):
+    """別のチャンネルが出した、この人がクレジットされた公式の動画と同じ曲のTOPIC音源は入れない。
+    同じ曲名でも、この人がクレジットされていない別の人の版（ボカロ版など）やカバーでは判定しない。"""
+    A, AT, P, Q = C("a"), C("atopic"), C("project"), C("other")
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "歌手A"
+    aliases: ["歌手A"]
+    channels: [{{id: "{A}", name: "歌手A"}}, {{id: "{AT}", name: "歌手A - Topic"}}]
+    playlist: {{name: "Aチャンネル"}}
+favorites:
+  - name: "企画P"
+    channels: [{{id: "{P}", name: "企画P"}}]
+  - name: "作者Q"
+    channels: [{{id: "{Q}", name: "作者Q"}}]
+""")
+    art = "Provided to YouTube by Label"
+    vs = [V("mv", "「曲X」feat.歌手A / 企画P", P, ch_title="企画P"),            # 公式の動画（タイトルでクレジット）
+          V("tx", "曲X", AT, desc=art, ch_title="歌手A - Topic"),
+          V("q", "曲Y / 作者Q feat.歌手B", Q, ch_title="作者Q"),               # 別の人の版
+          V("ty", "曲Y", AT, desc=art, ch_title="歌手A - Topic"),
+          V("cv", "曲Z / 歌手A (cover)", Q, desc="@a_now", ch_title="作者Q"),   # カバーは判定に使わない
+          V("tz", "曲Z", AT, desc=art, ch_title="歌手A - Topic")]
+    t, _ = targets(cfg, vs, {A: ["@a_now"]})
+    assert t["Aチャンネル"].auto == {"ty", "tz"}
+
+
+def test_members_only_videos(tmp_path):
+    A, B = C("a"), C("b")
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}]
+    playlist: {{name: "Aチャンネル"}}
+    membership: true
+  - name: "B"
+    channels: [{{id: "{B}", name: "B"}}]
+    playlist: {{name: "Bチャンネル"}}
+""")
+    vs = [V("a1", "【メン限】曲1", A), V("a2", "メン限｜新曲「曲2」先行公開", A), V("a3", "曲3", A),
+          {**V("a4", "曲4", A), "members": True},
+          V("b1", "【メンバー限定】曲5", B), {**V("b2", "曲6", B), "members": True}, V("b3", "曲7", B)]
+    t, idx = targets(cfg, vs, {})
+    assert t["Aチャンネル"].auto == {"a1", "a3", "a4"}       # 加入しているチャンネル：先行公開以外は入れる
+    assert t["Bチャンネル"].auto == {"b3"}                   # 加入していないチャンネル：メンバー限定は入れない
+    assert idx.members_skipped == {"a2", "b1", "b2"}
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(f'top_favorites:\n  - name: "A"\n    channels: [{{id: "{A}", name: "A"}}]\n    membership: "yes"\n',
+                   encoding="utf-8")
+    assert any("membership" in e for e in rules.validate(Config(bad)))
+
+
+def test_other_exclude_channels(tmp_path):
+    """別名義・所属ユニットのチャンネルの動画は「その他○○」の候補にしない。"""
+    A, U, X = C("a"), C("unit"), C("x")
+    cfg = cfg_of(tmp_path, f"""
+top_favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}]
+    other:
+      playlist: {{id: "PLotherAxxxxxxxxxxxxxxxxxxxxxxxxxx", name: "その他A"}}
+      exclude_channels: ["ユニットU"]
+favorites:
+  - name: "ユニットU"
+    channels: [{{id: "{U}", name: "ユニットU"}}]
+  - name: "X"
+    channels: [{{id: "{X}", name: "X"}}]
+""")
+    vs = [V("u1", "曲1 / ユニットU", U, desc="vo. @a_now", ch_title="ユニットU"),
+          V("x1", "曲2 / X", X, desc="vo. @a_now", ch_title="X")]
+    t, _ = targets(cfg, vs, {A: ["@a_now"]})
+    assert t["その他A"].cand == {"x1"}
+
+
+def test_song_partial_match_only_in_title_position(tmp_path):
+    """曲名の部分一致は最初の区切り（曲名の位置）だけ。アーティスト名の位置で当たっても候補にしない。"""
+    A = C("a")
+    cfg = cfg_of(tmp_path, f"""
+favorites:
+  - name: "A"
+    channels: [{{id: "{A}", name: "A"}}]
+songs:
+  - name: "KAZE"
+""")
+    vs = [V("c1", "別の曲 - KAZE Band / A (cover)", A), V("c2", "KAZE Remix Party / A", A), V("c3", "KAZE / A", A)]
+    t, _ = targets(cfg, vs, {})
+    assert t["KAZE"].auto == {"c3"} and t["KAZE"].cand == {"c2"}
